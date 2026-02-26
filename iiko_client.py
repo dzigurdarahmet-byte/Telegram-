@@ -111,19 +111,35 @@ class IikoClient:
         data = await self.get_nomenclature()
         products = data.get("products", [])
         groups = data.get("groups", [])
+        sizes = data.get("sizes", [])
         group_map = {g["id"]: g.get("name", "Без группы") for g in groups}
+        # Карта размеров
+        size_map = {s["id"]: s.get("name", "") for s in sizes} if sizes else {}
         result = {}
         for p in products:
             price = 0
-            sizes = p.get("sizePrices", [])
-            if sizes and sizes[0].get("price"):
-                price = sizes[0]["price"].get("currentPrice", 0)
-            result[p["id"]] = {
+            size_prices = p.get("sizePrices", [])
+            if size_prices and size_prices[0].get("price"):
+                price = size_prices[0]["price"].get("currentPrice", 0)
+            product_info = {
                 "name": p.get("name", "?"),
                 "group": group_map.get(p.get("parentGroup"), "Другое"),
                 "price": price,
                 "type": p.get("type", "")
             }
+            result[p["id"]] = product_info
+            # Также маппим по коду и артикулу если есть
+            if p.get("code"):
+                result[p["code"]] = product_info
+        # Добавляем группы в карту (стоп-лист может содержать группы)
+        for g in groups:
+            if g["id"] not in result:
+                result[g["id"]] = {
+                    "name": g.get("name", "?"),
+                    "group": "Группа",
+                    "price": 0,
+                    "type": "Group"
+                }
         return result
 
     async def get_menu_summary(self) -> str:
@@ -156,19 +172,28 @@ class IikoClient:
 
     async def get_stop_list_summary(self) -> str:
         data = await self.get_stop_lists()
+        # Сбрасываем кэш номенклатуры для актуальных данных
+        self._nomenclature_cache = None
         product_map = await self._get_product_map()
         items = []
+        unknown_count = 0
         for org_data in data.get("terminalGroupStopLists", []):
             for tg in org_data.get("items", []):
                 for item in tg.get("items", []):
                     product_id = item.get("productId", "")
                     product_info = product_map.get(product_id, {})
-                    name = product_info.get("name") or product_id[:8]
+                    name = product_info.get("name")
                     balance = item.get("balance", 0)
-                    items.append(f"  🔴 {name} (остаток: {balance})")
-        if not items:
+                    if name:
+                        items.append(f"  🔴 {name} (остаток: {balance})")
+                    else:
+                        unknown_count += 1
+        if not items and unknown_count == 0:
             return "✅ Стоп-лист пуст — все позиции в наличии!"
-        return f"🚫 Стоп-лист ({len(items)} позиций):\n" + "\n".join(items)
+        result = f"🚫 Стоп-лист ({len(items)} позиций):\n" + "\n".join(items)
+        if unknown_count > 0:
+            result += f"\n  ⚪ + {unknown_count} позиций без названия в справочнике"
+        return result
 
     # ─── ПОЛУЧЕНИЕ ЗАКАЗОВ (все способы) ───────────────────
 
