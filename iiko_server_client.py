@@ -4,6 +4,7 @@ iiko Server API клиент (локальный)
 Документация: https://examples.iiko.ru/server/
 """
 
+import hashlib
 import httpx
 import asyncio
 import xml.etree.ElementTree as ET
@@ -26,14 +27,15 @@ class IikoServerClient:
         """
         server_url: например 'https://localhost:443' или 'http://localhost:8080'
         login: логин администратора iikoOffice
-        password: пароль
+        password: пароль (открытый текст — будет автоматически захэширован в SHA1)
         """
         self.server_url = server_url.rstrip("/")
         self.login = login
         self.password = password
+        self.password_hash = hashlib.sha1(password.encode('utf-8')).hexdigest()
         self.token: Optional[str] = None
         self.token_time: Optional[datetime] = None
-        self.client = httpx.AsyncClient(timeout=30.0, verify=False)  # verify=False для самоподписанных сертификатов
+        self.client = httpx.AsyncClient(timeout=30.0, verify=False)
 
     async def _ensure_token(self):
         """Получить или обновить токен авторизации"""
@@ -42,7 +44,7 @@ class IikoServerClient:
 
         response = await self.client.get(
             f"{self.server_url}/resto/api/auth",
-            params={"login": self.login, "pass": self.password}
+            params={"login": self.login, "pass": self.password_hash}
         )
         response.raise_for_status()
         self.token = response.text.strip().strip('"')
@@ -68,7 +70,7 @@ class IikoServerClient:
         import json
         return json.loads(text)
 
-    # ─── OLAP-отчёты ──────────────────────────────────────
+    # ─── OLAP-отчёты ──────────────────────────────────────────────
 
     async def get_olap_report(self, date_from: str, date_to: str,
                                 report_type: str = "SALES") -> str:
@@ -150,7 +152,7 @@ class IikoServerClient:
 
         return {"data": rows, "headers": headers, "count": len(rows)}
 
-    # ─── Сотрудники ────────────────────────────────────────
+    # ─── Сотрудники ──────────────────────────────────────────────
 
     async def get_employees(self) -> list:
         """Список сотрудников"""
@@ -171,7 +173,7 @@ class IikoServerClient:
             logger.warning(f"Не удалось получить сотрудников: {e}")
             return []
 
-    # ─── Форматированная сводка ─────────────────────────────
+    # ─── Форматированная сводка ──────────────────────────────────
 
     async def get_sales_summary(self, date_from: str, date_to: str) -> str:
         """Сводка продаж зала для Claude"""
