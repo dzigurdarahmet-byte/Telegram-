@@ -436,41 +436,45 @@ class IikoServerClient:
             return []
 
     async def get_roles_debug(self) -> str:
-        """Отладка: список ролей/должностей"""
+        """Отладка: уникальные роли из списка сотрудников"""
         lines = []
-        # Роли
-        try:
-            text = await self._get("/resto/api/v2/entities/employees/role/list")
-            if text.strip().startswith("["):
-                roles = json.loads(text)
-                lines.append(f"Роли ({len(roles)}):")
-                for r in roles:
-                    code = r.get("code", "?")
-                    name = r.get("name", "?")
-                    lines.append(f"  {code} → {name}")
-            elif text.strip().startswith("<"):
-                root = ET.fromstring(text)
-                roles = root.findall(".//role") or root.findall(".//*")
-                lines.append(f"Роли (XML, {len(roles)}):")
-                for r in roles[:30]:
-                    code = r.findtext("code") or r.get("code", "")
-                    name = r.findtext("name") or r.get("name", "")
-                    if name:
-                        lines.append(f"  {code} → {name}")
-        except Exception as e:
-            lines.append(f"Роли: ошибка {e}")
 
-        # Попытка получить зарплаты
-        salary_endpoints = [
-            "/resto/api/v2/employees/schedule",
-            "/resto/api/v2/reports/payroll",
+        # Вытаскиваем роли прямо из сотрудников
+        try:
+            text = await self._get("/resto/api/employees")
+            root = ET.fromstring(text)
+            role_employees = {}
+            for emp in root.findall(".//employee"):
+                deleted = emp.findtext("deleted") or "false"
+                if deleted == "true":
+                    continue
+                name = emp.findtext("name") or "?"
+                code = emp.findtext("mainRoleCode") or "?"
+                if code not in role_employees:
+                    role_employees[code] = []
+                role_employees[code].append(name)
+
+            lines.append(f"Должности (из сотрудников):")
+            for code, names in sorted(role_employees.items()):
+                lines.append(f"\n  [{code}] — {len(names)} чел:")
+                for n in names[:10]:
+                    lines.append(f"    • {n}")
+                if len(names) > 10:
+                    lines.append(f"    ... ещё {len(names) - 10}")
+        except Exception as e:
+            lines.append(f"Ошибка сотрудников: {e}")
+
+        # Пробуем другие эндпоинты для ролей
+        role_endpoints = [
+            "/resto/api/corporation/roles",
+            "/resto/api/roles",
         ]
-        for ep in salary_endpoints:
+        for ep in role_endpoints:
             try:
                 text = await self._get(ep)
-                lines.append(f"\n{ep}: {text[:300]}")
-            except Exception as e:
-                lines.append(f"\n{ep}: {e}")
+                lines.append(f"\n{ep}: {text[:500]}")
+            except Exception:
+                pass
 
         return "\n".join(lines)
 
