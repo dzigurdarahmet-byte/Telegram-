@@ -179,7 +179,7 @@ class IikoClient:
         methods_tried = []
         methods_success = []
 
-        # Способ 1: Заказы доставки по дате и статусу (все статусы)
+        # Заказы доставки по дате и статусу (все статусы включая отменённые)
         try:
             methods_tried.append("deliveries/by_delivery_date_and_status")
             data = await self._post("/api/1/deliveries/by_delivery_date_and_status", {
@@ -189,7 +189,7 @@ class IikoClient:
                 "statuses": [
                     "Unconfirmed", "WaitCooking", "ReadyForCooking",
                     "CookingStarted", "CookingCompleted", "Waiting",
-                    "OnWay", "Delivered", "Closed"
+                    "OnWay", "Delivered", "Closed", "Cancelled"
                 ]
             })
             for org in data.get("ordersByOrganizations", []):
@@ -199,28 +199,6 @@ class IikoClient:
                     methods_success.append(f"deliveries: {len(orders)} заказов")
         except Exception as e:
             logger.warning(f"deliveries не сработал: {e}")
-
-        # Способ 2: Заказы доставки — все статусы (на случай если первый запрос не вернул все)
-        try:
-            methods_tried.append("deliveries (all statuses)")
-            data = await self._safe_post("/api/1/deliveries/by_delivery_date_and_status", {
-                "organizationIds": [org_id],
-                "deliveryDateFrom": f"{date_from} 00:00:00.000",
-                "deliveryDateTo": f"{date_to} 23:59:59.999",
-                "statuses": ["Unconfirmed", "WaitCooking", "ReadyForCooking",
-                             "CookingStarted", "CookingCompleted", "Waiting",
-                             "OnWay", "Delivered", "Closed", "Cancelled"]
-            })
-            if data:
-                for org_data in data.get("ordersByOrganizations", []):
-                    orders = org_data.get("orders", [])
-                    existing_ids = {o.get("id") or o.get("correlationId") for o in all_orders}
-                    new_orders = [o for o in orders if (o.get("id") or o.get("correlationId")) not in existing_ids]
-                    all_orders.extend(new_orders)
-                    if new_orders:
-                        methods_success.append(f"deliveries (all): {len(new_orders)} новых заказов")
-        except Exception as e:
-            logger.warning(f"deliveries (all) не сработал: {e}")
 
         # Фильтруем удалённые заказы
         filtered = []

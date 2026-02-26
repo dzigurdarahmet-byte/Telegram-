@@ -93,7 +93,8 @@ async def get_combined_data(period: str) -> str:
         except Exception as e:
             parts.append(f"⚠️ Зал: {e}")
 
-    return "\n\n" + "═" * 40 + "\n\n".join(parts)
+    separator = "\n\n" + "═" * 40 + "\n\n"
+    return separator.join(parts)
 
 
 # ─── Команды ───────────────────────────────────────────────
@@ -126,6 +127,30 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def _safe_send(msg, text: str, update: Update = None):
+    """Отправить текст, разбивая длинные сообщения и обрабатывая ошибки Markdown"""
+    if len(text) > 4000:
+        parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
+    else:
+        parts = [text]
+
+    for i, part in enumerate(parts):
+        try:
+            if i == 0:
+                await msg.edit_text(part, parse_mode="Markdown")
+            elif update:
+                await update.message.reply_text(part, parse_mode="Markdown")
+        except Exception:
+            # Фолбэк без Markdown если парсинг не удался
+            try:
+                if i == 0:
+                    await msg.edit_text(part)
+                elif update:
+                    await update.message.reply_text(part)
+            except Exception:
+                pass
+
+
 async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str, question: str):
     """Общий обработчик для команд с периодом"""
     if not check_access(update.effective_user.id):
@@ -135,13 +160,7 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
     try:
         data = await get_combined_data(period)
         analysis = claude.analyze(question, data)
-        if len(analysis) > 4000:
-            parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
-            await msg.edit_text(parts[0], parse_mode="Markdown")
-            for part in parts[1:]:
-                await update.message.reply_text(part, parse_mode="Markdown")
-        else:
-            await msg.edit_text(analysis, parse_mode="Markdown")
+        await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -197,7 +216,7 @@ async def cmd_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Раздели данные по залу и доставке.",
             data
         )
-        await msg.edit_text(analysis, parse_mode="Markdown")
+        await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -214,7 +233,7 @@ async def cmd_abc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Рекомендации: что убрать, что продвигать. Учти и зал, и доставку.",
             data
         )
-        await msg.edit_text(analysis, parse_mode="Markdown")
+        await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -252,8 +271,13 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
             today = datetime.now().strftime("%Y-%m-%d")
             try:
                 data = await iiko_server.get_sales_data(yesterday, today)
-                rows = len(data.get("data", []))
-                parts.append(f"✅ OLAP зала: {rows} записей")
+                if "error" in data:
+                    parts.append(f"❌ OLAP зала: {data['error']}")
+                else:
+                    day_rows = len(data.get("day_rows", []))
+                    dish_rows = len(data.get("dish_rows", []))
+                    waiter_rows = len(data.get("waiter_rows", []))
+                    parts.append(f"✅ OLAP зала: {day_rows} дней, {dish_rows} блюд, {waiter_rows} сотрудников")
             except Exception as e:
                 parts.append(f"❌ OLAP зала: {e}")
         else:
@@ -288,14 +312,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         period = _detect_period(question)
         data = await get_combined_data(period)
         analysis = claude.analyze(question, data)
-
-        if len(analysis) > 4000:
-            parts = [analysis[i:i+4000] for i in range(0, len(analysis), 4000)]
-            await msg.edit_text(parts[0], parse_mode="Markdown")
-            for part in parts[1:]:
-                await update.message.reply_text(part, parse_mode="Markdown")
-        else:
-            await msg.edit_text(analysis, parse_mode="Markdown")
+        await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
