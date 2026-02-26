@@ -884,51 +884,104 @@ class IikoServerClient:
 
         lines = [f"📊 === ПРОИЗВОДИТЕЛЬНОСТЬ КУХНИ ({date_from} — {date_to}) ==="]
 
+        # ─── Собираем выручку кухни по дням ───
+        dish_group_day_rows = data.get("dish_group_day_rows", [])
+        daily_kitchen = defaultdict(float)
+        for row in dish_group_day_rows:
+            group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+            if self._is_bar_group(group):
+                continue
+            day = row.get("OpenDate.Typed") or row.get("Учетный день") or "?"
+            revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
+            daily_kitchen[day] += revenue
+
+        # ─── Ежедневная таблица производительности ───
+        if daily_kitchen and effective_cooks > 0:
+            lines.append(f"\nПоваров в смене: {effective_cooks} (Google Sheets)")
+            if effective_salary > 0:
+                lines.append(f"Ср. зарплата повара за день: {effective_salary:.0f} руб. (Google Sheets)")
+
+            # Гипотетические варианты кол-ва поваров
+            hyp_counts = sorted(set([3, 5, 6]) - {effective_cooks})[:3]
+
+            lines.append("")
+            lines.append("=== ВЫРУЧКА КУХНИ ПО ДНЯМ ===")
+            hyp_header = " | ".join([f"Гип.{h}" for h in hyp_counts])
+            lines.append(f"  Дата       | Выручка кухни | Поваров | На 1 повара | {hyp_header}")
+            lines.append(f"  {'-' * 70}")
+
+            total_rev = 0
+            day_data = []
+            for day in sorted(daily_kitchen.keys()):
+                rev = daily_kitchen[day]
+                total_rev += rev
+                per_cook = rev / effective_cooks
+                hyp_vals = [rev / h for h in hyp_counts]
+                day_data.append({"day": day, "rev": rev, "per_cook": per_cook, "hyp": hyp_vals})
+
+                # Короткая дата (dd.mm)
+                short_day = day[8:10] + "." + day[5:7] if len(day) >= 10 else day
+                hyp_str = " | ".join([f"{v:>7.0f}" for v in hyp_vals])
+                lines.append(
+                    f"  {short_day:10} | {rev:>13.0f} | {effective_cooks:>7} | {per_cook:>11.0f} | {hyp_str}"
+                )
+
+            num_days = len(day_data)
+            avg_per_cook = (total_rev / effective_cooks / num_days) if num_days > 0 else 0
+            hyp_totals = " | ".join([f"{total_rev / h / num_days:>7.0f}" for h in hyp_counts])
+            lines.append(f"  {'-' * 70}")
+            lines.append(
+                f"  {'ИТОГО':10} | {total_rev:>13.0f} | {effective_cooks:>7} | {avg_per_cook:>11.0f} | {hyp_totals}"
+            )
+            lines.append(f"  Дней: {num_days}")
+
+            # ─── Коэффициент производительности ───
+            if effective_salary > 0:
+                coeff = avg_per_cook / effective_salary
+                lines.append(f"\n=== КОЭФФИЦИЕНТ ПРОИЗВОДИТЕЛЬНОСТИ ===")
+                lines.append(f"  Выручка на 1 повара в день: {avg_per_cook:.0f} руб.")
+                lines.append(f"  Зарплата повара за день:    {effective_salary:.0f} руб.")
+                lines.append(f"  Коэфф. (факт):              {coeff:.1f}")
+                for h in hyp_counts:
+                    hyp_per_cook = total_rev / h / num_days
+                    hyp_coeff = hyp_per_cook / effective_salary
+                    lines.append(f"  Коэфф. (гип. {h} поваров):   {hyp_coeff:.1f}")
+
+                lines.append("")
+                if coeff >= 3:
+                    lines.append(f"  Оценка: ОТЛИЧНО — повара окупаются в {coeff:.1f}x")
+                elif coeff >= 2:
+                    lines.append(f"  Оценка: ХОРОШО — повара окупаются в {coeff:.1f}x")
+                elif coeff >= 1:
+                    lines.append(f"  Оценка: УДОВЛЕТВОРИТЕЛЬНО — окупаемость {coeff:.1f}x")
+                else:
+                    lines.append(f"  Оценка: НИЗКАЯ — повара не окупают зарплату ({coeff:.1f}x)")
+
+        elif not daily_kitchen:
+            lines.append("\n⚠️ Нет данных по выручке кухни за этот период")
+        else:
+            lines.append("\n⚠️ Нет данных по поварам. Привяжите таблицу зарплат: /setsheet <ссылка>")
+
         # ─── Категории блюд (кухня vs бар) ───
         dish_group_rows = data.get("dish_group_rows", [])
         if dish_group_rows:
-            lines.append("\n=== ВЫРАБОТКА ПО КАТЕГОРИЯМ БЛЮД ===")
-            kitchen_total_qty = 0
-            kitchen_total_rev = 0
-            bar_total_qty = 0
-            bar_total_rev = 0
+            lines.append("\n=== ВЫРУЧКА ПО КАТЕГОРИЯМ ===")
             kitchen_groups = []
+            kitchen_total_rev = 0
+            bar_total_rev = 0
             for row in dish_group_rows:
                 group = row.get("DishGroup") or row.get("Группа блюда") or "?"
                 qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
                 revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
                 if self._is_bar_group(group):
-                    bar_total_qty += qty
                     bar_total_rev += revenue
                 else:
-                    kitchen_total_qty += qty
                     kitchen_total_rev += revenue
                     kitchen_groups.append({"group": group, "qty": qty, "revenue": revenue})
-
-            lines.append(f"  КУХНЯ итого: {kitchen_total_qty:.0f} блюд, {kitchen_total_rev:.0f} руб.")
-            lines.append(f"  БАР итого: {bar_total_qty:.0f} позиций, {bar_total_rev:.0f} руб.")
-            lines.append("  Кухня по категориям:")
+            lines.append(f"  КУХНЯ: {kitchen_total_rev:.0f} руб.")
             for g in sorted(kitchen_groups, key=lambda x: x["revenue"], reverse=True):
                 lines.append(f"    {g['group']} | {g['qty']:.0f} шт | {g['revenue']:.0f} руб.")
-
-        # ─── Нагрузка кухни по часам ───
-        dish_hour_rows = data.get("dish_hour_rows", [])
-        if dish_hour_rows:
-            lines.append("\n=== НАГРУЗКА КУХНИ ПО ЧАСАМ ===")
-            hour_stats = defaultdict(lambda: {"qty": 0, "revenue": 0})
-            for row in dish_hour_rows:
-                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
-                if self._is_bar_group(group):
-                    continue
-                hour = row.get("HourOpen") or row.get("Час открытия") or "?"
-                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
-                revenue = float(row.get("DishSumInt") or row.get("Сумма без скидки") or 0)
-                hour_stats[hour]["qty"] += qty
-                hour_stats[hour]["revenue"] += revenue
-            for h in sorted(hour_stats.keys()):
-                s = hour_stats[h]
-                bar = "█" * min(int(s["qty"] / 5), 30) if s["qty"] > 0 else ""
-                lines.append(f"  {h}:00 | {s['qty']:.0f} блюд | {s['revenue']:.0f} руб. {bar}")
+            lines.append(f"  БАР: {bar_total_rev:.0f} руб.")
 
         # ─── Топ кухонных блюд ───
         dish_detail_rows = data.get("dish_detail_rows", [])
@@ -942,154 +995,9 @@ class IikoServerClient:
                 name = row.get("DishName") or row.get("Блюдо") or "?"
                 qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
                 revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
-                kitchen_dishes.append({"name": name, "group": group, "qty": qty, "revenue": revenue})
-            for d in sorted(kitchen_dishes, key=lambda x: x["qty"], reverse=True)[:25]:
-                lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб. | {d['group']}")
-
-        # ─── Кухонные станции (CookingPlace) ───
-        cooking_place_rows = data.get("cooking_place_rows", [])
-        if cooking_place_rows:
-            lines.append("\n=== КУХОННЫЕ СТАНЦИИ ===")
-            for row in sorted(cooking_place_rows, key=lambda x: float(x.get("DishAmountInt") or 0), reverse=True):
-                place = row.get("CookingPlace") or row.get("Место приготовления") or "?"
-                qty = float(row.get("DishAmountInt") or 0)
-                revenue = float(row.get("DishSumInt") or 0)
-                cook_dur = row.get("Cooking.CookingDuration.Avg") or row.get("Ср. время готовки") or ""
-                kitchen_time = row.get("Cooking.KitchenTime.Avg") or row.get("Ср. время на кухне") or ""
-                wait_time = row.get("Cooking.GuestWaitTime.Avg") or row.get("Ср. ожидание гостя") or ""
-                time_parts = []
-                if cook_dur:
-                    time_parts.append(f"готовка: {cook_dur}")
-                if kitchen_time:
-                    time_parts.append(f"кухня: {kitchen_time}")
-                if wait_time:
-                    time_parts.append(f"ожидание: {wait_time}")
-                time_str = " | ".join(time_parts) if time_parts else ""
-                lines.append(f"  {place} | {qty:.0f} блюд | {revenue:.0f} руб. | {time_str}")
-
-        # ─── Время готовки по категориям ───
-        cooking_time_rows = data.get("cooking_time_rows", [])
-        if cooking_time_rows:
-            lines.append("\n=== ВРЕМЯ ГОТОВКИ ПО КАТЕГОРИЯМ ===")
-            for row in cooking_time_rows:
-                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
-                if self._is_bar_group(group):
-                    continue
-                qty = float(row.get("DishAmountInt") or 0)
-                cook_dur = row.get("Cooking.CookingDuration.Avg") or ""
-                kitchen_time = row.get("Cooking.KitchenTime.Avg") or ""
-                serve_time = row.get("Cooking.ServeTime.Avg") or ""
-                late_time = row.get("Cooking.CookingLateTime.Avg") or ""
-                parts = [f"{group}: {qty:.0f} блюд"]
-                if cook_dur:
-                    parts.append(f"готовка {cook_dur}")
-                if kitchen_time:
-                    parts.append(f"кухня {kitchen_time}")
-                if serve_time:
-                    parts.append(f"подача {serve_time}")
-                if late_time:
-                    parts.append(f"опоздания {late_time}")
-                lines.append(f"  {' | '.join(parts)}")
-
-        # ─── Нагрузка и скорость по часам ───
-        cooking_hour_rows = data.get("cooking_hour_rows", [])
-        if cooking_hour_rows:
-            lines.append("\n=== СКОРОСТЬ КУХНИ ПО ЧАСАМ ===")
-            for row in sorted(cooking_hour_rows, key=lambda x: x.get("HourOpen") or x.get("Час открытия") or ""):
-                hour = row.get("HourOpen") or row.get("Час открытия") or "?"
-                qty = float(row.get("DishAmountInt") or 0)
-                orders = float(row.get("UniqOrderId.OrdersCount") or 0)
-                cook_dur = row.get("Cooking.CookingDuration.Avg") or ""
-                wait_time = row.get("Cooking.GuestWaitTime.Avg") or ""
-                parts = [f"{hour}:00 | {qty:.0f} блюд | {orders:.0f} заказов"]
-                if cook_dur:
-                    parts.append(f"готовка {cook_dur}")
-                if wait_time:
-                    parts.append(f"ожидание {wait_time}")
-                lines.append(f"  {' | '.join(parts)}")
-
-        # ─── Общие итоги ───
-        day_rows = data.get("day_rows", [])
-        num_days = len(day_rows) if day_rows else 1
-        if day_rows:
-            lines.append("\n=== ОБЩИЕ ИТОГИ ПО ДНЯМ ===")
-            total_qty = 0
-            total_orders = 0
-            total_revenue = 0
-            for row in day_rows:
-                day = row.get("OpenDate.Typed") or row.get("Учетный день") or "?"
-                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
-                orders = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
-                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
-                total_qty += qty
-                total_orders += orders
-                total_revenue += revenue
-                lines.append(f"  {day} | {qty:.0f} блюд | {orders:.0f} заказов | {revenue:.0f} руб.")
-            lines.append(f"  ИТОГО: {total_qty:.0f} блюд, {total_orders:.0f} заказов, {total_revenue:.0f} руб.")
-            if total_orders > 0:
-                lines.append(f"  Среднее блюд на заказ: {total_qty / total_orders:.1f}")
-            if num_days > 0:
-                lines.append(f"  Среднее блюд в день: {total_qty / num_days:.0f}")
-
-        # ─── ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ───
-        # Данные по поварам (кол-во, зарплата) из Google Sheets
-        # Формула: Выручка кухни / Поваров / Зарплата за день
-        dish_group_rows = data.get("dish_group_rows", [])
-        if effective_cooks > 0 and effective_salary > 0 and dish_group_rows:
-            lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ===")
-            lines.append(f"  Поваров: {effective_cooks} (Google Sheets)")
-            lines.append(f"  Средняя зарплата повара за день: {effective_salary:.0f} руб. (Google Sheets)")
-            lines.append(f"  Рабочих дней в периоде: {num_days}")
-            lines.append("")
-
-            # Собираем кухонные категории
-            kitchen_groups_prod = []
-            kitchen_rev_total = 0
-            for row in dish_group_rows:
-                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
-                if self._is_bar_group(group):
-                    continue
-                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
-                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
-                kitchen_groups_prod.append({"group": group, "revenue": revenue, "qty": qty})
-                kitchen_rev_total += revenue
-
-            # Расчёт по каждой категории
-            salary_total_per_day = effective_cooks * effective_salary
-            lines.append("  По категориям кухни (за день):")
-            for g in sorted(kitchen_groups_prod, key=lambda x: x["revenue"], reverse=True):
-                daily_rev = g["revenue"] / num_days
-                per_cook = daily_rev / effective_cooks
-                coeff = per_cook / effective_salary
-                lines.append(
-                    f"    {g['group']}: "
-                    f"{daily_rev:.0f} руб./день → "
-                    f"{per_cook:.0f} руб./повар → "
-                    f"коэфф. {coeff:.2f}"
-                )
-
-            # Итого по всей кухне
-            daily_total = kitchen_rev_total / num_days
-            per_cook_total = daily_total / effective_cooks
-            coeff_total = per_cook_total / effective_salary
-            lines.append("")
-            lines.append(f"  ИТОГО КУХНЯ за день: {daily_total:.0f} руб.")
-            lines.append(f"  Выручка на 1 повара: {per_cook_total:.0f} руб.")
-            lines.append(f"  ФОТ поваров за день: {salary_total_per_day:.0f} руб.")
-            lines.append(f"  Коэффициент производительности: {coeff_total:.2f}")
-            lines.append(f"  (выручка на повара / зарплата за день)")
-            if coeff_total >= 3:
-                lines.append(f"  Оценка: ОТЛИЧНО — повара окупаются в {coeff_total:.1f}x")
-            elif coeff_total >= 2:
-                lines.append(f"  Оценка: ХОРОШО — повара окупаются в {coeff_total:.1f}x")
-            elif coeff_total >= 1:
-                lines.append(f"  Оценка: УДОВЛЕТВОРИТЕЛЬНО — окупаемость {coeff_total:.1f}x")
-            else:
-                lines.append(f"  Оценка: НИЗКАЯ — повара не окупают свою зарплату ({coeff_total:.1f}x)")
-
-        else:
-            lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ===")
-            lines.append(f"  ⚠️ Нет данных для расчёта. Привяжите таблицу зарплат: /setsheet <ссылка>")
+                kitchen_dishes.append({"name": name, "qty": qty, "revenue": revenue})
+            for d in sorted(kitchen_dishes, key=lambda x: x["qty"], reverse=True)[:15]:
+                lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб.")
 
         return "\n".join(lines)
 
