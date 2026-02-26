@@ -756,16 +756,13 @@ class IikoServerClient:
         """Данные для отчёта производительности кухни/поваров"""
         results = {}
 
-        # 1. Попробовать получить данные по повару (если iiko отслеживает)
-        # Перебираем возможные OLAP-поля: повар/кассир/официант/сотрудник
+        # 1. Попробовать получить данные по повару (только поля кухонного модуля)
+        # НЕ используем OrderWaiter/OpenUser/SessionUser — это официанты, не повара
         tried_fields = []
         for field in [
             "Cooking.Name",
             "OrderCookingUser.Name",
             "CookingUser.Name",
-            "OpenUser.Name",
-            "SessionUser.Name",
-            "OrderWaiter.Name",
         ]:
             try:
                 cook_rows = await self._olap_request(
@@ -955,10 +952,12 @@ class IikoServerClient:
         cook_field = data.get("cook_field", "")
         if not cook_rows:
             tried = data.get("tried_cook_fields", [])
+            lines.append(f"\n⚠️ Выработка по поварам недоступна — на сервере не настроен кухонный экран (KDS).")
+            lines.append(f"  Для рейтинга поваров нужен модуль iiko Kitchen Display.")
             if tried:
-                lines.append(f"\n⚠️ OLAP: данные по поварам не найдены. Проверенные поля:")
+                lines.append(f"  Проверенные OLAP-поля:")
                 for t in tried:
-                    lines.append(f"  • {t}")
+                    lines.append(f"    • {t}")
         if cook_rows:
             lines.append("\n=== ВЫРАБОТКА ПО ПОВАРАМ ===")
             for row in sorted(cook_rows, key=lambda x: float(x.get("DishAmountInt") or x.get("Количество блюд") or 0), reverse=True):
