@@ -67,7 +67,8 @@ def _get_period_dates(period: str):
     elif period == "week":
         return (today - timedelta(days=7)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), "За неделю"
     elif period == "month":
-        return (today - timedelta(days=30)).strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), "За месяц"
+        first_day = today.replace(day=1)
+        return first_day.strftime("%Y-%m-%d"), today.strftime("%Y-%m-%d"), "За месяц"
     return period, period, period
 
 

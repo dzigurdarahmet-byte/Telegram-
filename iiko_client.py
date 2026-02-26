@@ -431,7 +431,7 @@ class IikoClient:
             date_to = today.strftime("%Y-%m-%d")
             label = "За неделю"
         elif period == "month":
-            date_from = (today - timedelta(days=30)).strftime("%Y-%m-%d")
+            date_from = today.replace(day=1).strftime("%Y-%m-%d")
             date_to = today.strftime("%Y-%m-%d")
             label = "За месяц"
         else:
