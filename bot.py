@@ -548,6 +548,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     question = update.message.text
+
+    # Автопривязка Google Sheets — просто кинул ссылку в чат
+    global _sheet_id
+    sheet_id = _extract_sheet_id(question)
+    if sheet_id and "docs.google.com/spreadsheets" in question:
+        _sheet_id = sheet_id
+        await update.message.reply_text(
+            f"Таблица зарплат привязана.\n"
+            f"https://docs.google.com/spreadsheets/d/{_sheet_id}/edit\n\n"
+            f"Теперь /cooks будет брать зарплаты отсюда."
+        )
+        return
+
     msg = await update.message.reply_text("🤔 Анализирую...")
     try:
         period = _detect_period(question)
