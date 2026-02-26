@@ -178,7 +178,6 @@ class IikoClient:
         self._nomenclature_cache = None
         product_map = await self._get_product_map()
         items = []
-        unknown_count = 0
         for org_data in data.get("terminalGroupStopLists", []):
             for tg in org_data.get("items", []):
                 for item in tg.get("items", []):
@@ -189,14 +188,11 @@ class IikoClient:
                     balance = item.get("balance", 0)
                     if name:
                         items.append(f"  🔴 {name} (остаток: {balance})")
-                    else:
-                        unknown_count += 1
-        if not items and unknown_count == 0:
+                    elif sku:
+                        items.append(f"  🔴 арт. {sku} (остаток: {balance})")
+        if not items:
             return "✅ Стоп-лист пуст — все позиции в наличии!"
-        result = f"🚫 Стоп-лист ({len(items)} позиций):\n" + "\n".join(items)
-        if unknown_count > 0:
-            result += f"\n  ⚪ + {unknown_count} позиций без названия в справочнике"
-        return result
+        return f"🚫 Стоп-лист ({len(items)} позиций):\n" + "\n".join(items)
 
     # ─── ПОЛУЧЕНИЕ ЗАКАЗОВ (все способы) ───────────────────
 
