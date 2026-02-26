@@ -365,35 +365,27 @@ class IikoClient:
         }
 
     async def get_stop_list_debug(self) -> str:
-        """Отладка стоп-листа: показать сырые данные и совпадения с номенклатурой"""
+        """Отладка стоп-листа: показать сырые данные"""
         data = await self.get_stop_lists()
         self._nomenclature_cache = None
         product_map = await self._get_product_map()
 
-        lines = [f"Номенклатура: {len(product_map)} записей в карте"]
-        lines.append("")
+        lines = [f"Номенклатура: {len(product_map)} записей"]
 
+        # Показать RAW структуру первых 3 записей стоп-листа
         count = 0
         for org_data in data.get("terminalGroupStopLists", []):
             for tg in org_data.get("items", []):
                 for item in tg.get("items", []):
-                    if count >= 10:
-                        break
-                    pid = item.get("productId", "?")
-                    balance = item.get("balance", "?")
-                    found = product_map.get(pid)
-                    if found:
-                        lines.append(f"✅ {pid[:12]}... → {found['name']}")
-                    else:
-                        lines.append(f"❌ {pid} → НЕ НАЙДЕНО")
+                    if count < 3:
+                        raw = json.dumps(item, ensure_ascii=False, default=str)
+                        found = product_map.get(item.get("productId", ""), {}).get("name", "НЕТ")
+                        lines.append(f"\n--- Запись {count+1} ---")
+                        lines.append(raw[:500])
+                        lines.append(f"В номенкл: {found}")
                     count += 1
 
-        # Показать пример ключей из product_map
-        lines.append("")
-        lines.append("Примеры ID в номенклатуре:")
-        for i, key in enumerate(list(product_map.keys())[:5]):
-            lines.append(f"  {key[:12]}... → {product_map[key]['name']}")
-
+        lines.append(f"\nВсего в стоп-листе: {count}")
         return "\n".join(lines)
 
     async def get_raw_order_sample(self) -> str:
