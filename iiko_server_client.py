@@ -660,78 +660,70 @@ class IikoServerClient:
                     err = str(e)[:80]
                     lines.append(f"❌ {ep}: {err}")
 
-        # ═══ 4. Список ВСЕХ доступных полей OLAP ═══
-        lines.append("\n═══ ВСЕ ПОЛЯ OLAP (SALES) ═══")
+        # ═══ 4. Полный список полей OLAP SALES ═══
+        lines.append("\n═══ ПОЛЯ OLAP SALES ═══")
         yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         today = datetime.now().strftime("%Y-%m-%d")
 
         await self._ensure_token()
-        # Пробуем получить колонки с параметром reportType
-        for rt in ["SALES", "EMPLOYEE_ATTENDANCES", "TRANSACTIONS"]:
-            try:
-                response = await self.client.get(
-                    f"{self.server_url}/resto/api/v2/reports/olap/columns",
-                    params={"key": self.token, "reportType": rt}
-                )
-                if response.status_code == 200:
-                    text = response.text
-                    lines.append(f"✅ Колонки {rt} ({len(text)} байт):")
-                    # Парсим — может быть JSON или XML
-                    if text.strip().startswith("[") or text.strip().startswith("{"):
-                        try:
-                            data = json.loads(text)
-                            if isinstance(data, list):
-                                # Ищем поля со словами wage/salary/rate/hour/attend
-                                wage_fields = []
-                                all_names = []
-                                for col in data:
-                                    name = col if isinstance(col, str) else (col.get("name") or col.get("id") or str(col))
-                                    all_names.append(name)
-                                    name_lower = name.lower()
-                                    if any(kw in name_lower for kw in [
-                                        "wage", "salary", "rate", "hour", "attend",
-                                        "sched", "shift", "ставк", "зарпл", "час",
-                                        "смен", "отработ", "табел",
-                                    ]):
-                                        wage_fields.append(name)
-                                if wage_fields:
-                                    lines.append(f"  ЗАРПЛАТНЫЕ ПОЛЯ: {', '.join(wage_fields)}")
-                                lines.append(f"  Всего полей: {len(all_names)}")
-                                lines.append(f"  Все поля: {', '.join(all_names[:80])}")
-                                if len(all_names) > 80:
-                                    lines.append(f"  ... ещё {len(all_names) - 80}")
-                            elif isinstance(data, dict):
-                                lines.append(f"  Ключи: {', '.join(list(data.keys())[:30])}")
-                                # Показать содержимое
-                                for key, val in data.items():
-                                    if isinstance(val, list) and val:
-                                        wage_items = []
-                                        all_items = []
-                                        for item in val:
-                                            name = item if isinstance(item, str) else (item.get("name") or item.get("id") or str(item))
-                                            all_items.append(str(name))
-                                            if any(kw in str(name).lower() for kw in [
-                                                "wage", "salary", "rate", "hour", "attend",
-                                                "sched", "shift", "ставк", "зарпл", "час",
-                                                "смен", "отработ",
-                                            ]):
-                                                wage_items.append(str(name))
-                                        if wage_items:
-                                            lines.append(f"  {key} ЗАРПЛАТНЫЕ: {', '.join(wage_items)}")
-                                        lines.append(f"  {key} ({len(all_items)}): {', '.join(all_items[:50])}")
-                        except json.JSONDecodeError:
-                            lines.append(f"  Raw: {text[:800]}")
-                    else:
-                        lines.append(f"  Raw: {text[:800]}")
-                else:
-                    lines.append(f"❌ Колонки {rt}: {response.status_code} {response.text[:100]}")
-            except Exception as e:
-                lines.append(f"❌ Колонки {rt}: {str(e)[:100]}")
+        try:
+            response = await self.client.get(
+                f"{self.server_url}/resto/api/v2/reports/olap/columns",
+                params={"key": self.token, "reportType": "SALES"}
+            )
+            if response.status_code == 200:
+                data = json.loads(response.text)
+                # Структура: dict где ключи = имена полей
+                all_field_names = sorted(data.keys()) if isinstance(data, dict) else []
 
-        # ═══ 5. Ещё эндпоинты для расписания/ставок ═══
-        lines.append("\n═══ ДОПОЛНИТЕЛЬНЫЕ ЭНДПОИНТЫ ═══")
-        extra_endpoints = [
-        ]
+                # Ключевые слова для поиска зарплатных/часовых полей
+                wage_kw = [
+                    "wage", "salary", "rate", "hour", "attend", "sched",
+                    "shift", "cook", "kitchen", "time", "duration",
+                    "ставк", "зарпл", "час", "смен", "отработ", "табел",
+                    "повар", "кухн", "длител", "врем",
+                ]
+                wage_fields = [f for f in all_field_names
+                               if any(kw in f.lower() for kw in wage_kw)]
+                # Также поля с Employee/Waiter/Worker
+                employee_fields = [f for f in all_field_names
+                                   if any(kw in f.lower() for kw in [
+                                       "employee", "waiter", "worker", "staff",
+                                       "сотруд", "офици", "персон",
+                                   ])]
+                # CookingPlace и подобные
+                cook_fields = [f for f in all_field_names
+                               if any(kw in f.lower() for kw in [
+                                   "cook", "повар", "кухн",
+                               ])]
+
+                lines.append(f"Всего полей: {len(all_field_names)}")
+
+                if wage_fields:
+                    lines.append(f"\n⭐ ЗАРПЛАТА/ЧАСЫ ({len(wage_fields)}):")
+                    for f in wage_fields:
+                        lines.append(f"  {f}")
+
+                if cook_fields:
+                    lines.append(f"\n👨‍🍳 ПОВАР/КУХНЯ ({len(cook_fields)}):")
+                    for f in cook_fields:
+                        lines.append(f"  {f}")
+
+                if employee_fields:
+                    lines.append(f"\n👤 СОТРУДНИКИ ({len(employee_fields)}):")
+                    for f in employee_fields:
+                        lines.append(f"  {f}")
+
+                # Все поля для полноты
+                lines.append(f"\n📋 ВСЕ ПОЛЯ ({len(all_field_names)}):")
+                lines.append(", ".join(all_field_names))
+            else:
+                lines.append(f"❌ {response.status_code}: {response.text[:200]}")
+        except Exception as e:
+            lines.append(f"❌ {str(e)[:200]}")
+
+        # Пусто — заглушка чтобы не было ошибки
+        extra_endpoints = []
         for ep in extra_endpoints:
             try:
                 text = await self._get(ep)
