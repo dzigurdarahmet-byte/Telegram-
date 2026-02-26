@@ -272,6 +272,24 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать все группы из номенклатуры"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔍 Загружаю категории...")
+    try:
+        data = await iiko_cloud.get_nomenclature()
+        groups = data.get("groups", [])
+        lines = [f"📂 Категории в iiko ({len(groups)}):\n"]
+        for g in sorted(groups, key=lambda x: x.get("name", "")):
+            name = g.get("name", "?")
+            gid = g.get("id", "")[:8]
+            lines.append(f"  • {name}")
+        await msg.edit_text("\n".join(lines)[:4000])
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отладка стоп-листа"""
     if not check_access(update.effective_user.id):
@@ -415,6 +433,7 @@ def main():
     app.add_handler(CommandHandler("abc", cmd_abc))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("debug", cmd_debug))
+    app.add_handler(CommandHandler("groups", cmd_groups))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
