@@ -756,52 +756,7 @@ class IikoServerClient:
         """Данные для отчёта производительности кухни/поваров"""
         results = {}
 
-        # 1. Попробовать получить данные по повару (только поля кухонного модуля)
-        # НЕ используем OrderWaiter/OpenUser/SessionUser — это официанты, не повара
-        tried_fields = []
-        for field in [
-            "Cooking.Name",
-            "OrderCookingUser.Name",
-            "CookingUser.Name",
-        ]:
-            try:
-                cook_rows = await self._olap_request(
-                    date_from, date_to,
-                    group_fields=[field],
-                    aggregate_fields=["DishAmountInt", "DishSumInt", "DishDiscountSumInt"]
-                )
-                if cook_rows:
-                    results["cook_rows"] = cook_rows
-                    results["cook_field"] = field
-                    logger.info(f"Повара найдены через {field}: {len(cook_rows)} строк")
-                    # По повару + группа блюд
-                    try:
-                        results["cook_dish_rows"] = await self._olap_request(
-                            date_from, date_to,
-                            group_fields=[field, "DishGroup"],
-                            aggregate_fields=["DishAmountInt", "DishSumInt"]
-                        )
-                    except Exception:
-                        pass
-                    # По повару + день
-                    try:
-                        results["cook_day_rows"] = await self._olap_request(
-                            date_from, date_to,
-                            group_fields=[field, "OpenDate.Typed"],
-                            aggregate_fields=["DishAmountInt", "DishSumInt"]
-                        )
-                    except Exception:
-                        pass
-                    break
-                else:
-                    tried_fields.append(f"{field}: пусто")
-            except Exception as e:
-                tried_fields.append(f"{field}: ошибка")
-                logger.info(f"OLAP поле {field} недоступно: {e}")
-        if tried_fields and "cook_rows" not in results:
-            results["tried_cook_fields"] = tried_fields
-
-        # 2. Блюда по категориям (для разделения кухня/бар)
+        # 1. Блюда по категориям (кухня/бар)
         try:
             results["dish_group_rows"] = await self._olap_request(
                 date_from, date_to,
@@ -914,87 +869,20 @@ class IikoServerClient:
         return group_name.lower().strip() in self.BAR_GROUPS
 
     async def get_cook_productivity_summary(self, date_from: str, date_to: str,
-                                              cooks_per_shift: int = 0,
-                                              cook_salary: float = 0,
-                                              cook_role_codes: list = None) -> str:
-        """Сводка производительности кухни/поваров для Claude"""
+                                              cooks_count: int = 0,
+                                              cook_salary: float = 0) -> str:
+        """Сводка производительности кухни для Claude.
+        cooks_count и cook_salary приходят из Google Sheets (через bot.py).
+        """
         data = await self.get_cook_productivity_data(date_from, date_to)
 
         if "error" in data:
             return f"⚠️ Ошибка: {data['error']}"
 
-        # Получаем данные поваров из iiko (зарплата, количество)
-        staff = await self.get_cook_staff_data(cook_role_codes)
-        iiko_salary = staff.get("avg_salary", 0)
-        iiko_cook_count = staff.get("count", 0)
-
-        # Приоритет: данные из iiko → фолбэк из конфига
-        effective_salary = iiko_salary if iiko_salary > 0 else cook_salary
-        effective_cooks = iiko_cook_count if iiko_cook_count > 0 else cooks_per_shift
+        effective_salary = cook_salary
+        effective_cooks = cooks_count
 
         lines = [f"📊 === ПРОИЗВОДИТЕЛЬНОСТЬ КУХНИ ({date_from} — {date_to}) ==="]
-
-        # Информация об источнике данных поваров
-        if staff.get("cooks"):
-            lines.append(f"\n=== ПОВАРА ИЗ IIKO ({iiko_cook_count} чел.) ===")
-            for c in staff["cooks"]:
-                salary_str = f"{c['salary']:.0f} руб." if c["salary"] > 0 else "не указана"
-                lines.append(f"  {c['name']} | роль: {c['role']} | зарплата: {salary_str}")
-            if iiko_salary > 0:
-                lines.append(f"  Средняя зарплата за смену: {iiko_salary:.0f} руб. (источник: {staff['source']})")
-            else:
-                lines.append(f"  ⚠️ Зарплата в iiko не найдена")
-        elif not staff.get("error"):
-            lines.append(f"\n⚠️ Повара не найдены в iiko (доступные поля: {', '.join(staff.get('available_fields', [])[:15])})")
-
-        # ─── Данные по поварам (если есть) ───
-        cook_rows = data.get("cook_rows", [])
-        cook_field = data.get("cook_field", "")
-        if not cook_rows:
-            tried = data.get("tried_cook_fields", [])
-            lines.append(f"\n⚠️ Выработка по поварам недоступна — на сервере не настроен кухонный экран (KDS).")
-            lines.append(f"  Для рейтинга поваров нужен модуль iiko Kitchen Display.")
-            if tried:
-                lines.append(f"  Проверенные OLAP-поля:")
-                for t in tried:
-                    lines.append(f"    • {t}")
-        if cook_rows:
-            lines.append("\n=== ВЫРАБОТКА ПО ПОВАРАМ ===")
-            for row in sorted(cook_rows, key=lambda x: float(x.get("DishAmountInt") or x.get("Количество блюд") or 0), reverse=True):
-                name = row.get(cook_field) or row.get("Повар") or "?"
-                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
-                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
-                lines.append(f"  {name} | {qty:.0f} блюд | {revenue:.0f} руб.")
-
-        # По повару + категория блюд
-        cook_dish_rows = data.get("cook_dish_rows", [])
-        if cook_dish_rows:
-            lines.append("\n=== ПОВАРА ПО КАТЕГОРИЯМ БЛЮД ===")
-            cook_groups = defaultdict(list)
-            for row in cook_dish_rows:
-                name = row.get(cook_field) or row.get("Повар") or "?"
-                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
-                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
-                revenue = float(row.get("DishSumInt") or row.get("Сумма без скидки") or 0)
-                cook_groups[name].append({"group": group, "qty": qty, "revenue": revenue})
-            for name, items in cook_groups.items():
-                lines.append(f"  {name}:")
-                for item in sorted(items, key=lambda x: x["qty"], reverse=True)[:10]:
-                    lines.append(f"    {item['group']} | {item['qty']:.0f} шт | {item['revenue']:.0f} руб.")
-
-        # По повару + день
-        cook_day_rows = data.get("cook_day_rows", [])
-        if cook_day_rows:
-            lines.append("\n=== ДИНАМИКА ПОВАРОВ ПО ДНЯМ ===")
-            cook_days = defaultdict(list)
-            for row in cook_day_rows:
-                name = row.get(cook_field) or row.get("Повар") or "?"
-                day = row.get("OpenDate.Typed") or row.get("Учетный день") or "?"
-                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
-                cook_days[name].append({"day": day, "qty": qty})
-            for name, days in cook_days.items():
-                day_strs = [f"{d['day']}: {d['qty']:.0f}" for d in sorted(days, key=lambda x: x["day"])]
-                lines.append(f"  {name}: {', '.join(day_strs)}")
 
         # ─── Категории блюд (кухня vs бар) ───
         dish_group_rows = data.get("dish_group_rows", [])
@@ -1144,15 +1032,13 @@ class IikoServerClient:
                 lines.append(f"  Среднее блюд в день: {total_qty / num_days:.0f}")
 
         # ─── ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ───
-        # Формула: Выручка категории / Поваров в смену / Зарплата за смену
+        # Данные по поварам (кол-во, зарплата) из Google Sheets
+        # Формула: Выручка кухни / Поваров / Зарплата за день
         dish_group_rows = data.get("dish_group_rows", [])
         if effective_cooks > 0 and effective_salary > 0 and dish_group_rows:
-            salary_source = "iiko" if iiko_salary > 0 else "конфиг (.env)"
-            cooks_source = f"iiko, роль {cook_role_codes}" if iiko_cook_count > 0 else "конфиг (.env)"
-
             lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ===")
-            lines.append(f"  Поваров в смене: {effective_cooks} (источник: {cooks_source})")
-            lines.append(f"  Средняя зарплата повара за день: {effective_salary:.0f} руб. (источник: {salary_source})")
+            lines.append(f"  Поваров: {effective_cooks} (Google Sheets)")
+            lines.append(f"  Средняя зарплата повара за день: {effective_salary:.0f} руб. (Google Sheets)")
             lines.append(f"  Рабочих дней в периоде: {num_days}")
             lines.append("")
 
@@ -1203,16 +1089,7 @@ class IikoServerClient:
 
         else:
             lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ===")
-            missing = []
-            if effective_cooks <= 0:
-                missing.append("кол-во поваров (COOKS_PER_SHIFT или COOK_ROLE_CODES)")
-            if effective_salary <= 0:
-                missing.append("зарплата (Google Sheets или COOK_SALARY_PER_SHIFT)")
-            lines.append(f"  ⚠️ Не удалось рассчитать: нет данных — {', '.join(missing)}")
-            lines.append("  Настройте в .env:")
-            lines.append("    COOK_ROLE_CODES=ПОВАР,СУ-ШЕФ    # роли поваров в iiko")
-            lines.append("    COOKS_PER_SHIFT=3                # или вручную кол-во")
-            lines.append("    COOK_SALARY_PER_SHIFT=3000       # фолбэк если нет в iiko")
+            lines.append(f"  ⚠️ Нет данных для расчёта. Привяжите таблицу зарплат: /setsheet <ссылка>")
 
         return "\n".join(lines)
 

@@ -349,27 +349,25 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Данные зарплат из Google Sheets
         sheet_salary = 0
+        sheet_cooks = 0
         if _sheet_id:
             try:
                 salary_data = await fetch_salary_data(_sheet_id, section="Повар")
                 parts.append(format_salary_summary(salary_data))
                 if salary_data.get("avg_daily_salary", 0) > 0:
                     sheet_salary = salary_data["avg_daily_salary"]
+                    sheet_cooks = salary_data.get("count", 0)
             except Exception as e:
                 parts.append(f"⚠️ Google Sheets: {e}")
         else:
             parts.append("⚠️ Таблица зарплат не привязана. Используйте /setsheet <ссылка>")
 
-        # Зарплата: Google Sheets (фактическая средняя за день) → конфиг
-        effective_salary = sheet_salary if sheet_salary > 0 else COOK_SALARY_PER_SHIFT
-
         # Данные кухни с локального сервера
         if iiko_server:
             cook_data = await iiko_server.get_cook_productivity_summary(
                 date_from, date_to,
-                cooks_per_shift=COOKS_PER_SHIFT,
-                cook_salary=effective_salary,
-                cook_role_codes=COOK_ROLE_CODES,
+                cooks_count=sheet_cooks or COOKS_PER_SHIFT,
+                cook_salary=sheet_salary or COOK_SALARY_PER_SHIFT,
             )
             parts.append(cook_data)
         else:
