@@ -4,6 +4,7 @@ Telegram-бот для аналитики ресторана
 """
 
 import asyncio
+import re
 import logging
 from datetime import datetime, timedelta
 
@@ -47,6 +48,23 @@ if IIKO_SERVER_LOGIN and IIKO_SERVER_PASSWORD:
     logger.info(f"Локальный iikoServer: {IIKO_SERVER_URL}")
 else:
     logger.info("Локальный iikoServer: не настроен (только облако)")
+
+
+# ─── Google Sheets ────────────────────────────────────────
+
+_sheet_id = GOOGLE_SHEET_ID  # из .env, можно переопределить через /setsheet
+
+
+def _extract_sheet_id(text: str) -> str:
+    """Извлечь Sheet ID из полной ссылки или голого ID"""
+    m = re.search(r'/spreadsheets/d/([a-zA-Z0-9_-]+)', text)
+    if m:
+        return m.group(1)
+    # Может быть голый ID без ссылки
+    text = text.strip()
+    if re.fullmatch(r'[a-zA-Z0-9_-]{20,}', text):
+        return text
+    return ""
 
 
 # Сотрудники, которых исключаем из отчёта /staff (не обслуживают зал)
@@ -131,6 +149,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👨‍🍳 *Сотрудники и кухня*\n"
         "  /staff — отчёт по сотрудникам\n"
         "  /cooks — производительность поваров\n"
+        "  /setsheet — привязать таблицу зарплат\n"
+        "  /sheet — текущая таблица\n"
         "  /abc — ABC-анализ блюд\n\n"
         "🔧 *Сервис*\n"
         "  /diag — диагностика подключений\n\n"
@@ -329,14 +349,16 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Данные зарплат из Google Sheets
         sheet_salary = 0
-        if GOOGLE_SHEET_ID:
+        if _sheet_id:
             try:
-                salary_data = await fetch_salary_data(GOOGLE_SHEET_ID, section="Повар")
+                salary_data = await fetch_salary_data(_sheet_id, section="Повар")
                 parts.append(format_salary_summary(salary_data))
                 if salary_data.get("avg_daily_salary", 0) > 0:
                     sheet_salary = salary_data["avg_daily_salary"]
             except Exception as e:
                 parts.append(f"⚠️ Google Sheets: {e}")
+        else:
+            parts.append("⚠️ Таблица зарплат не привязана. Используйте /setsheet <ссылка>")
 
         # Зарплата: Google Sheets (фактическая средняя за день) → конфиг
         effective_salary = sheet_salary if sheet_salary > 0 else COOK_SALARY_PER_SHIFT
@@ -380,6 +402,51 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_setsheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Привязать Google-таблицу зарплат: /setsheet <ссылка или ID>"""
+    if not check_access(update.effective_user.id):
+        return
+
+    global _sheet_id
+    if not context.args:
+        await update.message.reply_text(
+            "Отправьте ссылку на таблицу:\n"
+            "/setsheet https://docs.google.com/spreadsheets/d/.../edit"
+        )
+        return
+
+    raw = " ".join(context.args)
+    new_id = _extract_sheet_id(raw)
+    if not new_id:
+        await update.message.reply_text("Не удалось извлечь ID таблицы из ссылки.")
+        return
+
+    _sheet_id = new_id
+    await update.message.reply_text(
+        f"Таблица привязана.\n"
+        f"ID: {_sheet_id}\n\n"
+        f"Теперь /cooks будет брать зарплаты из этой таблицы."
+    )
+
+
+async def cmd_sheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать текущую привязанную таблицу"""
+    if not check_access(update.effective_user.id):
+        return
+
+    if _sheet_id:
+        await update.message.reply_text(
+            f"Текущая таблица зарплат:\n"
+            f"https://docs.google.com/spreadsheets/d/{_sheet_id}/edit\n\n"
+            f"Изменить: /setsheet <ссылка>"
+        )
+    else:
+        await update.message.reply_text(
+            "Таблица зарплат не привязана.\n"
+            "Привязать: /setsheet <ссылка на Google Sheets>"
+        )
 
 
 async def cmd_debugemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -533,6 +600,8 @@ async def post_init(application: Application):
         BotCommand("menu", "Меню"),
         BotCommand("staff", "Сотрудники"),
         BotCommand("cooks", "Производительность поваров"),
+        BotCommand("setsheet", "Привязать таблицу зарплат"),
+        BotCommand("sheet", "Текущая таблица зарплат"),
         BotCommand("abc", "ABC-анализ"),
         BotCommand("diag", "Диагностика"),
     ])
@@ -558,6 +627,8 @@ def main():
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("groups", cmd_groups))
     app.add_handler(CommandHandler("cooks", cmd_cooks))
+    app.add_handler(CommandHandler("setsheet", cmd_setsheet))
+    app.add_handler(CommandHandler("sheet", cmd_sheet))
     app.add_handler(CommandHandler("debugemp", cmd_debugemp))
     app.add_handler(CommandHandler("debugcooks", cmd_debugcooks))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
