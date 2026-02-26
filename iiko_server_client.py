@@ -28,7 +28,7 @@ class IikoServerClient:
         self.password_hash = hashlib.sha1(password.encode('utf-8')).hexdigest()
         self.token: Optional[str] = None
         self.token_time: Optional[datetime] = None
-        self.client = httpx.AsyncClient(timeout=30.0, verify=False)
+        self.client = httpx.AsyncClient(timeout=60.0, verify=False)
 
     async def _ensure_token(self):
         """Получить или обновить токен"""
@@ -61,13 +61,11 @@ class IikoServerClient:
                               report_type: str = "SALES") -> str:
         """
         OLAP-отчёт через POST JSON
-        date_from, date_to: формат DD.MM.YYYY
-        Формат подтверждён документацией iiko:
-        https://blog.fudov.ru/produkty-na-sotrudnika-v-chas
+        date_from, date_to: формат YYYY-MM-DD
         """
         await self._ensure_token()
 
-        # Формат из документации iiko — строковые "true"/"false"!
+        # Основной запрос — без лишних фильтров, минимум группировок
         json_body = {
             "reportType": report_type,
             "buildSummary": "false",
@@ -76,10 +74,7 @@ class IikoServerClient:
                 "DishGroup",
                 "OrderWaiter.Name",
                 "OpenDate.Typed",
-                "HourOpen",
-                "OrderType",
-                "TableNum",
-                "DishCode"
+                "HourOpen"
             ],
             "groupByColFields": [],
             "aggregateFields": [
@@ -96,31 +91,27 @@ class IikoServerClient:
                     "to": date_to,
                     "includeLow": "true",
                     "includeHigh": "true"
-                },
-                "DeletedWithWriteoff": {
-                    "filterType": "ExcludeValues",
-                    "values": ["DELETED_WITHOUT_WRITEOFF"]
                 }
             }
         }
 
         errors = []
 
-        # Попытка 1: POST JSON на v2 (основной формат)
+        # Попытка 1: POST JSON на v2
         try:
             response = await self.client.post(
                 f"{self.server_url}/resto/api/v2/reports/olap",
                 params={"key": self.token},
                 json=json_body
             )
-            logger.info(f"OLAP v2 JSON: status={response.status_code}, длина={len(response.text)}, начало={response.text[:300]}")
+            logger.info(f"OLAP v2 JSON: status={response.status_code}, длина={len(response.text)}")
             response.raise_for_status()
             return response.text
         except Exception as e1:
-            errors.append(f"v2-json({type(e1).__name__}): {e1}")
+            errors.append(f"v2-json: {e1}")
             logger.warning(f"OLAP v2 JSON: {e1}")
 
-        # Попытка 2: упрощённый JSON (минимум полей)
+        # Попытка 2: упрощённый запрос
         try:
             await self._ensure_token()
             json_simple = {
@@ -145,14 +136,14 @@ class IikoServerClient:
                 params={"key": self.token},
                 json=json_simple
             )
-            logger.info(f"OLAP v2 simple: status={response.status_code}, длина={len(response.text)}, начало={response.text[:300]}")
+            logger.info(f"OLAP v2 simple: status={response.status_code}, длина={len(response.text)}")
             response.raise_for_status()
             return response.text
         except Exception as e2:
-            errors.append(f"v2-simple({type(e2).__name__}): {e2}")
+            errors.append(f"v2-simple: {e2}")
             logger.warning(f"OLAP v2 simple: {e2}")
 
-        # Попытка 3: Content-Type application/json явно
+        # Попытка 3: явный Content-Type
         try:
             await self._ensure_token()
             body_str = json.dumps(json_body, ensure_ascii=False)
@@ -162,11 +153,11 @@ class IikoServerClient:
                 content=body_str,
                 headers={"Content-Type": "application/json"}
             )
-            logger.info(f"OLAP v2 explicit CT: status={response.status_code}, длина={len(response.text)}, начало={response.text[:300]}")
+            logger.info(f"OLAP v2 explicit CT: status={response.status_code}, длина={len(response.text)}")
             response.raise_for_status()
             return response.text
         except Exception as e3:
-            errors.append(f"v2-explicit-ct({type(e3).__name__}): {e3}")
+            errors.append(f"v2-explicit-ct: {e3}")
             logger.warning(f"OLAP v2 explicit CT: {e3}")
 
         raise Exception(f"OLAP не удался: {'; '.join(errors)}")
@@ -275,6 +266,7 @@ class IikoServerClient:
 
         lines = ["📊 === ДАННЫЕ ЗАЛА (iikoServer) ==="]
         total_revenue = 0
+        total_revenue_full = 0
         total_qty = 0
         dish_data = []
 
@@ -288,24 +280,24 @@ class IikoServerClient:
             orders = (row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
             date = (row.get("OpenDate.Typed") or row.get("Учетный день") or "")
             hour = (row.get("HourOpen") or row.get("Час открытия") or "")
-            order_type = (row.get("OrderType") or row.get("Тип заказа") or "")
-            table = (row.get("TableNum") or row.get("Номер стола") or "")
 
-            rev = revenue if revenue else revenue_full
-            total_revenue += rev
+            total_revenue += revenue
+            total_revenue_full += revenue_full
             total_qty += amount
             dish_data.append({
                 "name": name, "group": group, "qty": amount,
-                "revenue": rev, "revenue_full": revenue_full,
+                "revenue": revenue, "revenue_full": revenue_full,
                 "waiter": waiter, "orders": orders,
-                "date": date, "hour": hour,
-                "order_type": order_type, "table": table
+                "date": date, "hour": hour
             })
 
-        lines.append(f"Общая выручка зала: {total_revenue:.0f} руб.")
+        lines.append(f"Общая выручка зала (со скидкой): {total_revenue:.0f} руб.")
+        lines.append(f"Общая выручка зала (без скидки): {total_revenue_full:.0f} руб.")
         lines.append(f"Всего продано: {total_qty:.0f} шт")
+        lines.append(f"Всего строк OLAP: {len(rows)}")
         lines.append("")
 
+        # Продажи по блюдам
         lines.append("Продажи по блюдам:")
         sorted_dishes = sorted(dish_data, key=lambda x: x["revenue"], reverse=True)
         for d in sorted_dishes[:30]:
@@ -316,10 +308,9 @@ class IikoServerClient:
             if d['waiter'] != '?': parts.append(d['waiter'])
             if d['date']: parts.append(d['date'])
             if d['hour']: parts.append(f"{d['hour']}ч")
-            if d['order_type']: parts.append(d['order_type'])
-            if d['table']: parts.append(f"стол {d['table']}")
             lines.append(" | ".join(parts))
 
+        # Сотрудники
         waiter_stats = defaultdict(lambda: {"revenue": 0, "orders": 0})
         for d in dish_data:
             waiter_stats[d["waiter"]]["revenue"] += d["revenue"]
@@ -330,6 +321,7 @@ class IikoServerClient:
         for name, stats in sorted(waiter_stats.items(), key=lambda x: x[1]["revenue"], reverse=True):
             lines.append(f"  {name} | {stats['revenue']:.0f} руб. | {stats['orders']:.0f} заказов")
 
+        # По дням
         day_stats = defaultdict(lambda: {"revenue": 0, "orders": 0})
         for d in dish_data:
             if d["date"]:
@@ -342,6 +334,7 @@ class IikoServerClient:
             for day, stats in sorted(day_stats.items()):
                 lines.append(f"  {day} | {stats['revenue']:.0f} руб. | {stats['orders']:.0f} заказов")
 
+        # По часам
         hour_stats = defaultdict(float)
         for d in dish_data:
             if d["hour"]:
