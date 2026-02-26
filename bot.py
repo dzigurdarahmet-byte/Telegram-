@@ -77,9 +77,12 @@ async def get_combined_data(period: str) -> str:
     date_from, date_to, label = _get_period_dates(period)
     parts = []
 
-    # 1. Стоп-лист (облако)
+    # 1. Стоп-лист (облако + сервер для названий)
     try:
-        parts.append(await iiko_cloud.get_stop_list_summary())
+        extra = {}
+        if iiko_server:
+            extra = await iiko_server.get_products()
+        parts.append(await iiko_cloud.get_stop_list_summary(extra_products=extra))
     except Exception as e:
         parts.append(f"⚠️ Стоп-лист: {e}")
 
@@ -197,7 +200,11 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("⏳ Проверяю стоп-лист...")
     try:
-        data = await iiko_cloud.get_stop_list_summary()
+        # Подтягиваем продукты с локального сервера для полных названий
+        extra = {}
+        if iiko_server:
+            extra = await iiko_server.get_products()
+        data = await iiko_cloud.get_stop_list_summary(extra_products=extra)
         await msg.edit_text(data)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")

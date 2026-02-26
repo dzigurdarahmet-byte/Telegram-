@@ -354,6 +354,51 @@ class IikoServerClient:
 
         return "\n".join(lines)
 
+    async def get_products(self) -> dict:
+        """Получить все продукты с сервера — возвращает {id: name, sku: name}"""
+        result = {}
+        try:
+            text = await self._get("/resto/api/v2/entities/products/list")
+            data = json.loads(text) if text.strip().startswith("[") or text.strip().startswith("{") else []
+            if isinstance(data, dict):
+                data = data.get("data") or data.get("items") or data.get("products") or []
+            for p in data:
+                name = p.get("name") or p.get("title") or ""
+                if not name:
+                    continue
+                if p.get("id"):
+                    result[p["id"]] = name
+                for key in ["code", "sku", "num", "article"]:
+                    val = p.get(key)
+                    if val:
+                        result[val] = name
+        except Exception as e:
+            logger.warning(f"Не удалось получить продукты с сервера: {e}")
+            # Пробуем альтернативный эндпоинт
+            try:
+                text = await self._get("/resto/api/products")
+                if text.strip().startswith("<"):
+                    root = ET.fromstring(text)
+                    for p in root.findall(".//*"):
+                        name = p.findtext("name") or p.get("name", "")
+                        pid = p.findtext("id") or p.get("id", "")
+                        code = p.findtext("code") or p.get("code", "")
+                        if name and pid:
+                            result[pid] = name
+                        if name and code:
+                            result[code] = name
+                elif text.strip().startswith("["):
+                    for p in json.loads(text):
+                        name = p.get("name", "")
+                        if name:
+                            if p.get("id"):
+                                result[p["id"]] = name
+                            if p.get("code"):
+                                result[p["code"]] = name
+            except Exception as e2:
+                logger.warning(f"Альтернативный эндпоинт продуктов тоже не сработал: {e2}")
+        return result
+
     async def get_employees(self) -> list:
         """Список сотрудников"""
         try:

@@ -172,11 +172,16 @@ class IikoClient:
             "organizationIds": [org_id]
         })
 
-    async def get_stop_list_summary(self) -> str:
+    async def get_stop_list_summary(self, extra_products: dict = None) -> str:
         data = await self.get_stop_lists()
         # Сбрасываем кэш номенклатуры для актуальных данных
         self._nomenclature_cache = None
         product_map = await self._get_product_map()
+        # Дополняем картой из локального сервера
+        if extra_products:
+            for key, name in extra_products.items():
+                if key not in product_map:
+                    product_map[key] = {"name": name, "group": "Другое", "price": 0, "type": ""}
         items = []
         for org_data in data.get("terminalGroupStopLists", []):
             for tg in org_data.get("items", []):
