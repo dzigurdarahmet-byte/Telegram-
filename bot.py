@@ -46,6 +46,10 @@ else:
     logger.info("Локальный iikoServer: не настроен (только облако)")
 
 
+# Сотрудники, которых исключаем из отчёта /staff (не обслуживают зал)
+EXCLUDED_STAFF = ["Стаховский Сергей", "denvic"]
+
+
 def check_access(user_id: int) -> bool:
     if not ALLOWED_USERS:
         return True
@@ -210,12 +214,14 @@ async def cmd_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Загружаю отчёт по сотрудникам...")
     try:
         data = await get_combined_data("week")
+        # Убираем строки с исключёнными сотрудниками из данных
+        filtered_lines = []
+        for line in data.split("\n"):
+            if not any(name in line for name in EXCLUDED_STAFF):
+                filtered_lines.append(line)
+        data = "\n".join(filtered_lines)
         analysis = claude.analyze(
-            "Проанализируй производительность ТОЛЬКО официантов и администраторов зала за неделю. "
-            "ВАЖНО: Исключи из анализа следующих — они НЕ обслуживают гостей: "
-            "Стаховский Сергей (операционный директор), denvic (системный аккаунт), "
-            "а также любых операторов доставки и курьеров. "
-            "Оценивай только тех, кто реально обслуживает гостей в зале. "
+            "Проанализируй производительность официантов и администраторов зала за неделю. "
             "Покажи: кто лучший, кто отстаёт, средний чек на сотрудника, рекомендации.",
             data
         )
