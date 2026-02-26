@@ -399,6 +399,25 @@ class IikoServerClient:
                 logger.warning(f"Альтернативный эндпоинт продуктов тоже не сработал: {e2}")
         return result
 
+    async def get_product_groups(self) -> list:
+        """Получить все группы продуктов с сервера"""
+        try:
+            text = await self._get("/resto/api/v2/entities/products/group/list")
+            data = json.loads(text) if text.strip() else []
+            if isinstance(data, dict):
+                data = data.get("data") or data.get("items") or data.get("groups") or []
+            groups = []
+            for g in data:
+                name = g.get("name") or g.get("title") or ""
+                gid = g.get("id", "")
+                parent = g.get("parentId") or g.get("parent", "")
+                if name:
+                    groups.append({"id": gid, "name": name, "parent": parent})
+            return groups
+        except Exception as e:
+            logger.warning(f"Не удалось получить группы продуктов: {e}")
+            return []
+
     async def get_employees(self) -> list:
         """Список сотрудников"""
         try:

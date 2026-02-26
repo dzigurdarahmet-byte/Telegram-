@@ -278,13 +278,22 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     msg = await update.message.reply_text("🔍 Загружаю категории...")
     try:
+        lines = []
+
+        # Облако
         data = await iiko_cloud.get_nomenclature()
-        groups = data.get("groups", [])
-        lines = [f"📂 Категории в iiko ({len(groups)}):\n"]
-        for g in sorted(groups, key=lambda x: x.get("name", "")):
-            name = g.get("name", "?")
-            gid = g.get("id", "")[:8]
-            lines.append(f"  • {name}")
+        cloud_groups = data.get("groups", [])
+        lines.append(f"☁️ ОБЛАКО ({len(cloud_groups)}):")
+        for g in sorted(cloud_groups, key=lambda x: x.get("name", "")):
+            lines.append(f"  • {g.get('name', '?')}")
+
+        # Локальный сервер
+        if iiko_server:
+            server_groups = await iiko_server.get_product_groups()
+            lines.append(f"\n🖥️ СЕРВЕР ({len(server_groups)}):")
+            for g in sorted(server_groups, key=lambda x: x.get("name", "")):
+                lines.append(f"  • {g['name']}")
+
         await msg.edit_text("\n".join(lines)[:4000])
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
