@@ -173,8 +173,8 @@ class IikoServerClient:
 
     async def get_sales_data(self, date_from: str, date_to: str) -> dict:
         """Получить данные о продажах"""
-        df = datetime.strptime(date_from, "%Y-%m-%d").strftime("%d.%m.%Y")
-        dt = datetime.strptime(date_to, "%Y-%m-%d").strftime("%d.%m.%Y")
+        df = date_from
+        dt = date_to
         try:
             report_text = await self.get_olap_report(df, dt, "SALES")
             return self._parse_olap(report_text)
