@@ -20,6 +20,7 @@ from config import (
     TELEGRAM_BOT_TOKEN, IIKO_API_LOGIN, ANTHROPIC_API_KEY,
     ALLOWED_USERS, ADMIN_CHAT_ID,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
+    COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT,
 )
 
 logging.basicConfig(
@@ -125,8 +126,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🚫 *Оперативка*\n"
         "  /stop — текущий стоп-лист\n"
         "  /menu — информация по меню\n\n"
-        "👨‍🍳 *Сотрудники*\n"
+        "👨‍🍳 *Сотрудники и кухня*\n"
         "  /staff — отчёт по сотрудникам\n"
+        "  /cooks — производительность поваров\n"
         "  /abc — ABC-анализ блюд\n\n"
         "🔧 *Сервис*\n"
         "  /diag — диагностика подключений\n\n"
@@ -299,6 +301,68 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отчёт производительности поваров кухни"""
+    if not check_access(update.effective_user.id):
+        return
+
+    # Определяем период: /cooks month, /cooks today и т.д.
+    period = "week"
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ("today", "сегодня"):
+            period = "today"
+        elif arg in ("yesterday", "вчера"):
+            period = "yesterday"
+        elif arg in ("month", "месяц"):
+            period = "month"
+        elif arg in ("week", "неделя"):
+            period = "week"
+
+    date_from, date_to, label = _get_period_dates(period)
+    msg = await update.message.reply_text(f"⏳ Загружаю отчёт по кухне ({label})...")
+
+    try:
+        parts = []
+
+        # Данные кухни с локального сервера
+        if iiko_server:
+            cook_data = await iiko_server.get_cook_productivity_summary(
+                date_from, date_to,
+                cooks_per_shift=COOKS_PER_SHIFT,
+                cook_salary=COOK_SALARY_PER_SHIFT,
+            )
+            parts.append(cook_data)
+        else:
+            parts.append("⚠️ Локальный сервер не настроен — данные кухни недоступны")
+
+        # Данные доставки (для полноты картины)
+        try:
+            cloud_data = await iiko_cloud.get_sales_summary(period)
+            parts.append(f"📦 ДОСТАВКА:\n{cloud_data}")
+        except Exception as e:
+            parts.append(f"⚠️ Доставка: {e}")
+
+        full_data = ("\n\n" + "═" * 40 + "\n\n").join(parts)
+
+        analysis = claude.analyze(
+            "Проанализируй производительность поваров кухни за период. "
+            "Структура отчёта:\n"
+            "1. Общая выработка кухни (блюда, выручка)\n"
+            "2. Если есть данные по поварам — рейтинг поваров по выработке, "
+            "сравнение между собой, динамика по дням\n"
+            "3. Пиковые часы нагрузки кухни — когда кухня работает на максимуме\n"
+            "4. Топ самых ходовых блюд кухни\n"
+            "5. Среднее количество блюд на заказ и в день\n"
+            "6. Рекомендации: оптимизация смен, подготовка заготовок к пику, "
+            "какие блюда упростить или убрать",
+            full_data
+        )
+        await _safe_send(msg, analysis, update)
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_debugemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отладка: роли и зарплаты сотрудников"""
     if not check_access(update.effective_user.id):
@@ -434,6 +498,7 @@ async def post_init(application: Application):
         BotCommand("stop", "Стоп-лист"),
         BotCommand("menu", "Меню"),
         BotCommand("staff", "Сотрудники"),
+        BotCommand("cooks", "Производительность поваров"),
         BotCommand("abc", "ABC-анализ"),
         BotCommand("diag", "Диагностика"),
     ])
@@ -458,6 +523,7 @@ def main():
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("groups", cmd_groups))
+    app.add_handler(CommandHandler("cooks", cmd_cooks))
     app.add_handler(CommandHandler("debugemp", cmd_debugemp))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

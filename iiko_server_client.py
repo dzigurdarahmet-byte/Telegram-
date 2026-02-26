@@ -493,6 +493,319 @@ class IikoServerClient:
         except Exception as e:
             return f"Ошибка: {e}"
 
+    # ─── Производительность поваров ───────────────────────────────────────
+
+    async def get_cook_productivity_data(self, date_from: str, date_to: str) -> dict:
+        """Данные для отчёта производительности кухни/поваров"""
+        results = {}
+
+        # 1. Попробовать получить данные по повару (если iiko отслеживает)
+        for field in ["Cooking.Name"]:
+            try:
+                cook_rows = await self._olap_request(
+                    date_from, date_to,
+                    group_fields=[field],
+                    aggregate_fields=["DishAmountInt", "DishSumInt", "DishDiscountSumInt"]
+                )
+                if cook_rows:
+                    results["cook_rows"] = cook_rows
+                    results["cook_field"] = field
+                    logger.info(f"Повара найдены через {field}: {len(cook_rows)} строк")
+                    # По повару + группа блюд
+                    try:
+                        results["cook_dish_rows"] = await self._olap_request(
+                            date_from, date_to,
+                            group_fields=[field, "DishGroup"],
+                            aggregate_fields=["DishAmountInt", "DishSumInt"]
+                        )
+                    except Exception:
+                        pass
+                    # По повару + день
+                    try:
+                        results["cook_day_rows"] = await self._olap_request(
+                            date_from, date_to,
+                            group_fields=[field, "OpenDate.Typed"],
+                            aggregate_fields=["DishAmountInt", "DishSumInt"]
+                        )
+                    except Exception:
+                        pass
+                    break
+            except Exception as e:
+                logger.info(f"OLAP поле {field} недоступно: {e}")
+
+        # 2. Блюда по категориям (для разделения кухня/бар)
+        try:
+            results["dish_group_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["DishGroup"],
+                aggregate_fields=["DishAmountInt", "DishSumInt", "DishDiscountSumInt"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP по группам блюд: {e}")
+
+        # 3. Блюда по группам + день (динамика кухни по дням)
+        try:
+            results["dish_group_day_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["DishGroup", "OpenDate.Typed"],
+                aggregate_fields=["DishAmountInt", "DishSumInt"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP группы+день: {e}")
+
+        # 4. Кухня по часам (пиковая нагрузка)
+        try:
+            results["dish_hour_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["DishGroup", "HourOpen"],
+                aggregate_fields=["DishAmountInt", "DishSumInt"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP группы+час: {e}")
+
+        # 5. Конкретные блюда (топ по выручке и количеству)
+        try:
+            results["dish_detail_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["DishName", "DishGroup"],
+                aggregate_fields=["DishAmountInt", "DishSumInt", "DishDiscountSumInt"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP детали блюд: {e}")
+
+        # 6. Общие итоги по дням (для контекста)
+        try:
+            results["day_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["OpenDate.Typed"],
+                aggregate_fields=["DishAmountInt", "DishSumInt",
+                                  "DishDiscountSumInt", "UniqOrderId.OrdersCount"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP по дням: {e}")
+
+        if not results:
+            return {"error": "Не удалось получить данные кухни"}
+
+        return results
+
+    # Группы, относящиеся к бару (для фильтрации кухонных позиций)
+    BAR_GROUPS = {
+        "алкогольные коктейли", "бар", "безалкогольные напитки",
+        "бренди и коньяк", "вермут", "вино", "вино безалкогольное",
+        "вино белое", "вино игристое", "вино красное", "вино оранжевое",
+        "вино розовое", "вино по бокалам", "виски", "вода", "водка",
+        "газированные напитки", "джин", "кофе", "крафтовый чай",
+        "крепкий алкоголь", "ликеры и настойки", "лимонады",
+        "милкшейки и сладкие напитки", "пиво", "пиво бутылочное",
+        "разливное пиво", "ром", "сок", "текила", "чай",
+        "соки&морс&gazirovka", "water",
+    }
+
+    def _is_bar_group(self, group_name: str) -> bool:
+        return group_name.lower().strip() in self.BAR_GROUPS
+
+    async def get_cook_productivity_summary(self, date_from: str, date_to: str,
+                                              cooks_per_shift: int = 0,
+                                              cook_salary: float = 0) -> str:
+        """Сводка производительности кухни/поваров для Claude"""
+        data = await self.get_cook_productivity_data(date_from, date_to)
+
+        if "error" in data:
+            return f"⚠️ Ошибка: {data['error']}"
+
+        lines = [f"📊 === ПРОИЗВОДИТЕЛЬНОСТЬ КУХНИ ({date_from} — {date_to}) ==="]
+
+        # ─── Данные по поварам (если есть) ───
+        cook_rows = data.get("cook_rows", [])
+        cook_field = data.get("cook_field", "")
+        if cook_rows:
+            lines.append("\n=== ВЫРАБОТКА ПО ПОВАРАМ ===")
+            for row in sorted(cook_rows, key=lambda x: float(x.get("DishAmountInt") or x.get("Количество блюд") or 0), reverse=True):
+                name = row.get(cook_field) or row.get("Повар") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
+                lines.append(f"  {name} | {qty:.0f} блюд | {revenue:.0f} руб.")
+
+        # По повару + категория блюд
+        cook_dish_rows = data.get("cook_dish_rows", [])
+        if cook_dish_rows:
+            lines.append("\n=== ПОВАРА ПО КАТЕГОРИЯМ БЛЮД ===")
+            cook_groups = defaultdict(list)
+            for row in cook_dish_rows:
+                name = row.get(cook_field) or row.get("Повар") or "?"
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                revenue = float(row.get("DishSumInt") or row.get("Сумма без скидки") or 0)
+                cook_groups[name].append({"group": group, "qty": qty, "revenue": revenue})
+            for name, items in cook_groups.items():
+                lines.append(f"  {name}:")
+                for item in sorted(items, key=lambda x: x["qty"], reverse=True)[:10]:
+                    lines.append(f"    {item['group']} | {item['qty']:.0f} шт | {item['revenue']:.0f} руб.")
+
+        # По повару + день
+        cook_day_rows = data.get("cook_day_rows", [])
+        if cook_day_rows:
+            lines.append("\n=== ДИНАМИКА ПОВАРОВ ПО ДНЯМ ===")
+            cook_days = defaultdict(list)
+            for row in cook_day_rows:
+                name = row.get(cook_field) or row.get("Повар") or "?"
+                day = row.get("OpenDate.Typed") or row.get("Учетный день") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                cook_days[name].append({"day": day, "qty": qty})
+            for name, days in cook_days.items():
+                day_strs = [f"{d['day']}: {d['qty']:.0f}" for d in sorted(days, key=lambda x: x["day"])]
+                lines.append(f"  {name}: {', '.join(day_strs)}")
+
+        # ─── Категории блюд (кухня vs бар) ───
+        dish_group_rows = data.get("dish_group_rows", [])
+        if dish_group_rows:
+            lines.append("\n=== ВЫРАБОТКА ПО КАТЕГОРИЯМ БЛЮД ===")
+            kitchen_total_qty = 0
+            kitchen_total_rev = 0
+            bar_total_qty = 0
+            bar_total_rev = 0
+            kitchen_groups = []
+            for row in dish_group_rows:
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
+                if self._is_bar_group(group):
+                    bar_total_qty += qty
+                    bar_total_rev += revenue
+                else:
+                    kitchen_total_qty += qty
+                    kitchen_total_rev += revenue
+                    kitchen_groups.append({"group": group, "qty": qty, "revenue": revenue})
+
+            lines.append(f"  КУХНЯ итого: {kitchen_total_qty:.0f} блюд, {kitchen_total_rev:.0f} руб.")
+            lines.append(f"  БАР итого: {bar_total_qty:.0f} позиций, {bar_total_rev:.0f} руб.")
+            lines.append("  Кухня по категориям:")
+            for g in sorted(kitchen_groups, key=lambda x: x["revenue"], reverse=True):
+                lines.append(f"    {g['group']} | {g['qty']:.0f} шт | {g['revenue']:.0f} руб.")
+
+        # ─── Нагрузка кухни по часам ───
+        dish_hour_rows = data.get("dish_hour_rows", [])
+        if dish_hour_rows:
+            lines.append("\n=== НАГРУЗКА КУХНИ ПО ЧАСАМ ===")
+            hour_stats = defaultdict(lambda: {"qty": 0, "revenue": 0})
+            for row in dish_hour_rows:
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                if self._is_bar_group(group):
+                    continue
+                hour = row.get("HourOpen") or row.get("Час открытия") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                revenue = float(row.get("DishSumInt") or row.get("Сумма без скидки") or 0)
+                hour_stats[hour]["qty"] += qty
+                hour_stats[hour]["revenue"] += revenue
+            for h in sorted(hour_stats.keys()):
+                s = hour_stats[h]
+                bar = "█" * min(int(s["qty"] / 5), 30) if s["qty"] > 0 else ""
+                lines.append(f"  {h}:00 | {s['qty']:.0f} блюд | {s['revenue']:.0f} руб. {bar}")
+
+        # ─── Топ кухонных блюд ───
+        dish_detail_rows = data.get("dish_detail_rows", [])
+        if dish_detail_rows:
+            lines.append("\n=== ТОП КУХОННЫХ БЛЮД ===")
+            kitchen_dishes = []
+            for row in dish_detail_rows:
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                if self._is_bar_group(group):
+                    continue
+                name = row.get("DishName") or row.get("Блюдо") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
+                kitchen_dishes.append({"name": name, "group": group, "qty": qty, "revenue": revenue})
+            for d in sorted(kitchen_dishes, key=lambda x: x["qty"], reverse=True)[:25]:
+                lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб. | {d['group']}")
+
+        # ─── Общие итоги ───
+        day_rows = data.get("day_rows", [])
+        num_days = len(day_rows) if day_rows else 1
+        if day_rows:
+            lines.append("\n=== ОБЩИЕ ИТОГИ ПО ДНЯМ ===")
+            total_qty = 0
+            total_orders = 0
+            total_revenue = 0
+            for row in day_rows:
+                day = row.get("OpenDate.Typed") or row.get("Учетный день") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                orders = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                total_qty += qty
+                total_orders += orders
+                total_revenue += revenue
+                lines.append(f"  {day} | {qty:.0f} блюд | {orders:.0f} заказов | {revenue:.0f} руб.")
+            lines.append(f"  ИТОГО: {total_qty:.0f} блюд, {total_orders:.0f} заказов, {total_revenue:.0f} руб.")
+            if total_orders > 0:
+                lines.append(f"  Среднее блюд на заказ: {total_qty / total_orders:.1f}")
+            if num_days > 0:
+                lines.append(f"  Среднее блюд в день: {total_qty / num_days:.0f}")
+
+        # ─── ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ───
+        # Формула: Выручка категории / Поваров в смену / Зарплата за смену
+        dish_group_rows = data.get("dish_group_rows", [])
+        if cooks_per_shift > 0 and cook_salary > 0 and dish_group_rows:
+            lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ===")
+            lines.append(f"  Поваров в смене: {cooks_per_shift}")
+            lines.append(f"  Зарплата повара за смену: {cook_salary:.0f} руб.")
+            lines.append(f"  Рабочих дней в периоде: {num_days}")
+            lines.append("")
+
+            # Собираем кухонные категории
+            kitchen_groups_prod = []
+            kitchen_rev_total = 0
+            for row in dish_group_rows:
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                if self._is_bar_group(group):
+                    continue
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or row.get("DishSumInt") or 0)
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                kitchen_groups_prod.append({"group": group, "revenue": revenue, "qty": qty})
+                kitchen_rev_total += revenue
+
+            # Расчёт по каждой категории
+            salary_total_per_day = cooks_per_shift * cook_salary
+            lines.append("  По категориям кухни (за день):")
+            for g in sorted(kitchen_groups_prod, key=lambda x: x["revenue"], reverse=True):
+                daily_rev = g["revenue"] / num_days
+                per_cook = daily_rev / cooks_per_shift
+                coeff = per_cook / cook_salary
+                lines.append(
+                    f"    {g['group']}: "
+                    f"{daily_rev:.0f} руб./день → "
+                    f"{per_cook:.0f} руб./повар → "
+                    f"коэфф. {coeff:.2f}"
+                )
+
+            # Итого по всей кухне
+            daily_total = kitchen_rev_total / num_days
+            per_cook_total = daily_total / cooks_per_shift
+            coeff_total = per_cook_total / cook_salary
+            lines.append("")
+            lines.append(f"  ИТОГО КУХНЯ за день: {daily_total:.0f} руб.")
+            lines.append(f"  Выручка на 1 повара: {per_cook_total:.0f} руб.")
+            lines.append(f"  ФОТ поваров за день: {salary_total_per_day:.0f} руб.")
+            lines.append(f"  Коэффициент производительности: {coeff_total:.2f}")
+            lines.append(f"  (выручка на повара / зарплата за смену)")
+            if coeff_total >= 3:
+                lines.append(f"  Оценка: ОТЛИЧНО — повара окупаются в {coeff_total:.1f}x")
+            elif coeff_total >= 2:
+                lines.append(f"  Оценка: ХОРОШО — повара окупаются в {coeff_total:.1f}x")
+            elif coeff_total >= 1:
+                lines.append(f"  Оценка: УДОВЛЕТВОРИТЕЛЬНО — окупаемость {coeff_total:.1f}x")
+            else:
+                lines.append(f"  Оценка: НИЗКАЯ — повара не окупают свою зарплату ({coeff_total:.1f}x)")
+
+        elif cooks_per_shift <= 0 or cook_salary <= 0:
+            lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ===")
+            lines.append("  ⚠️ Не заданы параметры COOKS_PER_SHIFT и/или COOK_SALARY_PER_SHIFT")
+            lines.append("  Добавьте в .env:")
+            lines.append("    COOKS_PER_SHIFT=3")
+            lines.append("    COOK_SALARY_PER_SHIFT=3000")
+
+        return "\n".join(lines)
+
     async def test_connection(self) -> str:
         """Тест подключения"""
         try:

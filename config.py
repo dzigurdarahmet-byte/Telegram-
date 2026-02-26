@@ -30,6 +30,11 @@ if ADMIN_CHAT_ID:
 else:
     ADMIN_CHAT_ID = None
 
+# ─── Производительность поваров ───────────────────────────
+
+COOKS_PER_SHIFT = int(os.getenv("COOKS_PER_SHIFT", "0"))
+COOK_SALARY_PER_SHIFT = float(os.getenv("COOK_SALARY_PER_SHIFT", "0"))
+
 
 def validate():
     errors = []
