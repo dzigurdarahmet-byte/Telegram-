@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from collections import defaultdict
 import logging
+import json
 import urllib3
 
 # Отключаем предупреждения о самоподписанных сертификатах
@@ -24,11 +25,6 @@ class IikoServerClient:
     """Клиент для локального iikoServer API"""
 
     def __init__(self, server_url: str, login: str, password: str):
-        """
-        server_url: например 'https://localhost:443' или 'http://localhost:8080'
-        login: логин администратора iikoOffice
-        password: пароль (открытый текст — будет автоматически захэширован в SHA1)
-        """
         self.server_url = server_url.rstrip("/")
         self.login = login
         self.password = password
@@ -64,34 +60,145 @@ class IikoServerClient:
         response.raise_for_status()
         return response.text
 
-    async def _get_json(self, endpoint: str, params: dict = None) -> dict:
-        """GET-запрос, ответ как JSON"""
-        text = await self._get(endpoint, params)
-        import json
-        return json.loads(text)
+    async def _post(self, endpoint: str, data: str = None, params: dict = None,
+                    content_type: str = "application/xml") -> str:
+        """POST-запрос к iikoServer API"""
+        await self._ensure_token()
+        if params is None:
+            params = {}
+        params["key"] = self.token
+        headers = {"Content-Type": content_type} if data else None
+        response = await self.client.post(
+            f"{self.server_url}{endpoint}",
+            params=params,
+            content=data,
+            headers=headers
+        )
+        response.raise_for_status()
+        return response.text
 
-    # ─── OLAP-отчёты ──────────────────────────────────────────────
+    # ─── OLAP-отчёты (POST) ──────────────────────────────────────
 
     async def get_olap_report(self, date_from: str, date_to: str,
                                 report_type: str = "SALES") -> str:
         """
-        Получить OLAP-отчёт
+        Получить OLAP-отчёт через POST
         report_type: SALES, TRANSACTIONS, DELIVERIES
         date_from, date_to: формат DD.MM.YYYY
         """
-        params = {
-            "reportType": report_type,
-            "buildSummary": "false",
-            "groupByRowFields": "DishName,DishGroup,Waiter",
-            "groupByColFields": "",
-            "aggregateFields": "DishDiscountSumInt,DishAmountInt,DishSumInt,UniqOrderId.OrdersCount",
-            "filters": f"OpenDate.Typed={date_from}...{date_to}",
-        }
-        return await self._get("/resto/api/v2/reports/olap", params)
+        # XML-тело запроса
+        xml_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+<olap>
+    <reportType>{report_type}</reportType>
+    <buildSummary>false</buildSummary>
+    <groupByRowFields>
+        <item>DishName</item>
+        <item>DishGroup</item>
+        <item>Waiter</item>
+    </groupByRowFields>
+    <groupByColFields/>
+    <aggregateFields>
+        <item>DishDiscountSumInt</item>
+        <item>DishAmountInt</item>
+        <item>DishSumInt</item>
+        <item>UniqOrderId.OrdersCount</item>
+    </aggregateFields>
+    <filters>
+        <item>
+            <field>OpenDate.Typed</field>
+            <filterType>DateRange</filterType>
+            <from>{date_from}</from>
+            <to>{date_to}</to>
+            <includeLow>true</includeLow>
+            <includeHigh>true</includeHigh>
+        </item>
+    </filters>
+</olap>"""
+
+        errors = []
+
+        # Попытка 1: POST с XML-телом на v2
+        try:
+            result = await self._post("/resto/api/v2/reports/olap", data=xml_body)
+            logger.info(f"OLAP v2 POST XML: длина={len(result)}")
+            return result
+        except Exception as e1:
+            errors.append(f"v2-xml: {e1}")
+            logger.warning(f"OLAP v2 POST XML: {e1}")
+
+        # Попытка 2: POST с query-параметрами на v2
+        try:
+            await self._ensure_token()
+            params = {
+                "key": self.token,
+                "reportType": report_type,
+                "buildSummary": "false",
+                "groupByRowFields": "DishName,DishGroup,Waiter",
+                "groupByColFields": "",
+                "aggregateFields": "DishDiscountSumInt,DishAmountInt,DishSumInt,UniqOrderId.OrdersCount",
+                "filters": f"OpenDate.Typed={date_from}...{date_to}",
+            }
+            response = await self.client.post(
+                f"{self.server_url}/resto/api/v2/reports/olap",
+                params=params
+            )
+            response.raise_for_status()
+            logger.info(f"OLAP v2 POST query: длина={len(response.text)}")
+            return response.text
+        except Exception as e2:
+            errors.append(f"v2-query: {e2}")
+            logger.warning(f"OLAP v2 POST query: {e2}")
+
+        # Попытка 3: POST на v1 API
+        try:
+            await self._ensure_token()
+            params = {
+                "key": self.token,
+                "reportType": report_type,
+                "buildSummary": "false",
+                "groupByRowFields": "DishName,DishGroup,Waiter",
+                "groupByColFields": "",
+                "aggregateFields": "DishDiscountSumInt,DishAmountInt,DishSumInt,UniqOrderId.OrdersCount",
+                "filters": f"OpenDate.Typed={date_from}...{date_to}",
+            }
+            response = await self.client.post(
+                f"{self.server_url}/resto/api/reports/olap",
+                params=params
+            )
+            response.raise_for_status()
+            logger.info(f"OLAP v1 POST: длина={len(response.text)}")
+            return response.text
+        except Exception as e3:
+            errors.append(f"v1: {e3}")
+            logger.warning(f"OLAP v1 POST: {e3}")
+
+        # Попытка 4: GET на v1 (некоторые старые версии)
+        try:
+            await self._ensure_token()
+            params = {
+                "key": self.token,
+                "reportType": report_type,
+                "buildSummary": "false",
+                "groupByRowFields": "DishName,DishGroup,Waiter",
+                "groupByColFields": "",
+                "aggregateFields": "DishDiscountSumInt,DishAmountInt,DishSumInt,UniqOrderId.OrdersCount",
+                "filters": f"OpenDate.Typed={date_from}...{date_to}",
+            }
+            response = await self.client.get(
+                f"{self.server_url}/resto/api/reports/olap",
+                params=params
+            )
+            response.raise_for_status()
+            logger.info(f"OLAP v1 GET: длина={len(response.text)}")
+            return response.text
+        except Exception as e4:
+            errors.append(f"v1-get: {e4}")
+            logger.warning(f"OLAP v1 GET: {e4}")
+
+        raise Exception(f"Все попытки OLAP: {'; '.join(errors)}")
 
     async def get_sales_data(self, date_from: str, date_to: str) -> dict:
-        """Получить данные о продажах и проанализировать"""
-        # Конвертируем формат даты YYYY-MM-DD -> DD.MM.YYYY
+        """Получить данные о продажах"""
         df = datetime.strptime(date_from, "%Y-%m-%d").strftime("%d.%m.%Y")
         dt = datetime.strptime(date_to, "%Y-%m-%d").strftime("%d.%m.%Y")
 
@@ -103,42 +210,61 @@ class IikoServerClient:
             return {"error": str(e)}
 
     def _parse_olap(self, text: str) -> dict:
-        """Распарсить OLAP-ответ (может быть XML или JSON)"""
+        """Распарсить OLAP-ответ"""
         text = text.strip()
+        logger.info(f"Парсим OLAP: длина={len(text)}, начало={text[:300]}")
 
-        # Пробуем JSON
+        if not text:
+            return {"data": [], "raw": "Пустой ответ"}
+
+        # JSON
         if text.startswith("{") or text.startswith("["):
-            import json
-            return json.loads(text)
+            try:
+                return json.loads(text)
+            except:
+                pass
 
-        # Пробуем XML
+        # XML
         if text.startswith("<"):
             return self._parse_olap_xml(text)
 
-        # CSV-подобный формат
-        return self._parse_olap_csv(text)
+        # CSV/TSV
+        if "\t" in text:
+            return self._parse_olap_csv(text)
+
+        return {"data": [], "raw": text[:3000]}
 
     def _parse_olap_xml(self, xml_text: str) -> dict:
         """Распарсить XML OLAP-ответ"""
-        root = ET.fromstring(xml_text)
-        rows = []
-        for row in root.findall(".//row") or root.findall(".//*"):
-            row_data = {}
-            for child in row:
-                row_data[child.tag] = child.text
-            if row_data:
-                rows.append(row_data)
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            return {"data": [], "raw": xml_text[:3000]}
 
-        # Также пробуем атрибуты
+        rows = []
+        for tag in [".//row", ".//record", ".//item", ".//r"]:
+            found = root.findall(tag)
+            if found:
+                for row in found:
+                    row_data = {}
+                    for child in row:
+                        row_data[child.tag] = child.text
+                    if row.attrib:
+                        row_data.update(row.attrib)
+                    if row_data:
+                        rows.append(row_data)
+                break
+
         if not rows:
             for elem in root.iter():
-                if elem.attrib:
+                if elem.attrib and elem.tag not in ['olap', 'report', 'result', 'response']:
                     rows.append(dict(elem.attrib))
 
+        logger.info(f"XML: {len(rows)} строк")
         return {"data": rows, "count": len(rows)}
 
     def _parse_olap_csv(self, text: str) -> dict:
-        """Распарсить CSV-подобный OLAP-ответ"""
+        """Распарсить CSV/TSV"""
         lines = text.strip().split("\n")
         if len(lines) < 2:
             return {"data": [], "raw": text}
@@ -146,10 +272,12 @@ class IikoServerClient:
         headers = lines[0].split("\t")
         rows = []
         for line in lines[1:]:
-            values = line.split("\t")
-            row = dict(zip(headers, values))
-            rows.append(row)
+            if line.strip():
+                values = line.split("\t")
+                row = dict(zip(headers, values))
+                rows.append(row)
 
+        logger.info(f"CSV: {len(rows)} строк, заголовки: {headers}")
         return {"data": rows, "headers": headers, "count": len(rows)}
 
     # ─── Сотрудники ──────────────────────────────────────────────
@@ -158,10 +286,8 @@ class IikoServerClient:
         """Список сотрудников"""
         try:
             text = await self._get("/resto/api/employees")
-            import json
             if text.strip().startswith("["):
                 return json.loads(text)
-            # XML
             root = ET.fromstring(text)
             employees = []
             for emp in root.findall(".//employee") or root.findall(".//*"):
@@ -173,7 +299,7 @@ class IikoServerClient:
             logger.warning(f"Не удалось получить сотрудников: {e}")
             return []
 
-    # ─── Форматированная сводка ──────────────────────────────────
+    # ─── Сводка ──────────────────────────────────────────────────
 
     async def get_sales_summary(self, date_from: str, date_to: str) -> str:
         """Сводка продаж зала для Claude"""
@@ -214,13 +340,11 @@ class IikoServerClient:
         lines.append(f"Всего продано: {total_qty:.0f} шт")
         lines.append("")
 
-        # Продажи по блюдам
         lines.append("Продажи по блюдам:")
         sorted_dishes = sorted(dish_data, key=lambda x: x["revenue"], reverse=True)
         for d in sorted_dishes[:30]:
             lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб. | {d['group']} | {d['waiter']}")
 
-        # Сотрудники
         waiter_stats = defaultdict(lambda: {"revenue": 0, "orders": 0})
         for d in dish_data:
             waiter_stats[d["waiter"]]["revenue"] += d["revenue"]
@@ -234,7 +358,7 @@ class IikoServerClient:
         return "\n".join(lines)
 
     async def test_connection(self) -> str:
-        """Тест подключения к серверу"""
+        """Тест подключения"""
         try:
             await self._ensure_token()
             return f"✅ iikoServer подключён ({self.server_url})"
