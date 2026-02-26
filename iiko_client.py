@@ -172,6 +172,19 @@ class IikoClient:
             "organizationIds": [org_id]
         })
 
+    @staticmethod
+    def _is_bar_item(name: str, group: str) -> bool:
+        """Определить, относится ли позиция к бару"""
+        text = (name + " " + group).lower()
+        bar_keywords = [
+            "напит", "бар", "вин", "пив", "вод", "сок", "кофе", "чай",
+            "коктейл", "алкогол", "лимонад", "морс", "компот", "смузи",
+            "молоч", "латте", "капучино", "эспрессо", "американо",
+            "виски", "водк", "ром", "джин", "текил", "ликёр", "ликер",
+            "шампан", "просекко", "легенда байкала", "газ.", "негаз.",
+        ]
+        return any(kw in text for kw in bar_keywords)
+
     async def get_stop_list_summary(self, extra_products: dict = None) -> str:
         data = await self.get_stop_lists()
         # Сбрасываем кэш номенклатуры для актуальных данных
@@ -182,25 +195,45 @@ class IikoClient:
             for key, name in extra_products.items():
                 if key not in product_map:
                     product_map[key] = {"name": name, "group": "Другое", "price": 0, "type": ""}
-        items = []
+
+        bar_items = []
+        kitchen_items = []
+
         for org_data in data.get("terminalGroupStopLists", []):
             for tg in org_data.get("items", []):
                 for item in tg.get("items", []):
                     product_id = item.get("productId", "")
                     sku = item.get("sku", "")
                     product_info = product_map.get(product_id) or product_map.get(sku) or {}
-                    name = product_info.get("name")
+                    name = product_info.get("name", "")
+                    group = product_info.get("group", "")
                     balance = item.get("balance", 0)
+
                     if balance <= 0:
                         status = "нет в наличии"
                     else:
                         status = f"остаток: {balance:.0f}"
                     label = name or (f"арт. {sku}" if sku else None)
-                    if label:
-                        items.append(f"  🔴 {label} — {status}")
-        if not items:
+                    if not label:
+                        continue
+
+                    line = f"  🔴 {label} — {status}"
+                    if self._is_bar_item(name, group):
+                        bar_items.append(line)
+                    else:
+                        kitchen_items.append(line)
+
+        if not bar_items and not kitchen_items:
             return "✅ Стоп-лист пуст — все позиции в наличии!"
-        return f"🚫 Стоп-лист ({len(items)} позиций):\n" + "\n".join(items)
+
+        parts = []
+        if kitchen_items:
+            parts.append(f"🍽️ КУХНЯ ({len(kitchen_items)}):\n" + "\n".join(kitchen_items))
+        if bar_items:
+            parts.append(f"🍷 БАР ({len(bar_items)}):\n" + "\n".join(bar_items))
+
+        total = len(bar_items) + len(kitchen_items)
+        return f"🚫 Стоп-лист ({total} позиций):\n\n" + "\n\n".join(parts)
 
     # ─── ПОЛУЧЕНИЕ ЗАКАЗОВ (все способы) ───────────────────
 
