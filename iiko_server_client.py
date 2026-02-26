@@ -1,6 +1,9 @@
 """
 iiko Server API клиент (локальный)
 Для получения данных зала (заказы столов, OLAP, сотрудники)
+
+СТРАТЕГИЯ: Несколько маленьких OLAP-запросов вместо одного большого.
+Это решает проблему обрезки данных сервером при слишком большом количестве строк.
 """
 
 import hashlib
@@ -55,34 +58,22 @@ class IikoServerClient:
         response.raise_for_status()
         return response.text
 
-    # ─── OLAP-отчёты ─────────────────────────────────────────────
+    # ─── OLAP-запросы ─────────────────────────────────────────────────────
 
-    async def get_olap_report(self, date_from: str, date_to: str,
-                              report_type: str = "SALES") -> str:
+    async def _olap_request(self, date_from: str, date_to: str,
+                            group_fields: list, aggregate_fields: list) -> list:
         """
-        OLAP-отчёт через POST JSON
-        date_from, date_to: формат YYYY-MM-DD
+        Один OLAP-запрос с минимальной группировкой.
+        Возвращает список строк (dict).
         """
         await self._ensure_token()
 
-        # Основной запрос — без лишних фильтров, минимум группировок
         json_body = {
-            "reportType": report_type,
+            "reportType": "SALES",
             "buildSummary": "false",
-            "groupByRowFields": [
-                "DishName",
-                "DishGroup",
-                "OrderWaiter.Name",
-                "OpenDate.Typed",
-                "HourOpen"
-            ],
+            "groupByRowFields": group_fields,
             "groupByColFields": [],
-            "aggregateFields": [
-                "DishDiscountSumInt",
-                "DishAmountInt",
-                "DishSumInt",
-                "UniqOrderId.OrdersCount"
-            ],
+            "aggregateFields": aggregate_fields,
             "filters": {
                 "OpenDate.Typed": {
                     "filterType": "DateRange",
@@ -95,122 +86,53 @@ class IikoServerClient:
             }
         }
 
-        errors = []
+        response = await self.client.post(
+            f"{self.server_url}/resto/api/v2/reports/olap",
+            params={"key": self.token},
+            json=json_body
+        )
+        logger.info(f"OLAP [{','.join(group_fields)}]: status={response.status_code}, len={len(response.text)}")
+        response.raise_for_status()
 
-        # Попытка 1: POST JSON на v2
-        try:
-            response = await self.client.post(
-                f"{self.server_url}/resto/api/v2/reports/olap",
-                params={"key": self.token},
-                json=json_body
-            )
-            logger.info(f"OLAP v2 JSON: status={response.status_code}, длина={len(response.text)}")
-            response.raise_for_status()
-            return response.text
-        except Exception as e1:
-            errors.append(f"v2-json: {e1}")
-            logger.warning(f"OLAP v2 JSON: {e1}")
+        return self._parse_olap_response(response.text)
 
-        # Попытка 2: упрощённый запрос
-        try:
-            await self._ensure_token()
-            json_simple = {
-                "reportType": report_type,
-                "buildSummary": "false",
-                "groupByRowFields": ["DishName", "DishGroup"],
-                "groupByColFields": [],
-                "aggregateFields": ["DishDiscountSumInt", "DishAmountInt"],
-                "filters": {
-                    "OpenDate.Typed": {
-                        "filterType": "DateRange",
-                        "periodType": "CUSTOM",
-                        "from": date_from,
-                        "to": date_to,
-                        "includeLow": "true",
-                        "includeHigh": "true"
-                    }
-                }
-            }
-            response = await self.client.post(
-                f"{self.server_url}/resto/api/v2/reports/olap",
-                params={"key": self.token},
-                json=json_simple
-            )
-            logger.info(f"OLAP v2 simple: status={response.status_code}, длина={len(response.text)}")
-            response.raise_for_status()
-            return response.text
-        except Exception as e2:
-            errors.append(f"v2-simple: {e2}")
-            logger.warning(f"OLAP v2 simple: {e2}")
-
-        # Попытка 3: явный Content-Type
-        try:
-            await self._ensure_token()
-            body_str = json.dumps(json_body, ensure_ascii=False)
-            response = await self.client.post(
-                f"{self.server_url}/resto/api/v2/reports/olap",
-                params={"key": self.token},
-                content=body_str,
-                headers={"Content-Type": "application/json"}
-            )
-            logger.info(f"OLAP v2 explicit CT: status={response.status_code}, длина={len(response.text)}")
-            response.raise_for_status()
-            return response.text
-        except Exception as e3:
-            errors.append(f"v2-explicit-ct: {e3}")
-            logger.warning(f"OLAP v2 explicit CT: {e3}")
-
-        raise Exception(f"OLAP не удался: {'; '.join(errors)}")
-
-    async def get_sales_data(self, date_from: str, date_to: str) -> dict:
-        """Получить данные о продажах"""
-        df = date_from
-        dt = date_to
-        try:
-            report_text = await self.get_olap_report(df, dt, "SALES")
-            return self._parse_olap(report_text)
-        except Exception as e:
-            logger.error(f"Ошибка OLAP: {e}")
-            return {"error": str(e)}
-
-    def _parse_olap(self, text: str) -> dict:
-        """Распарсить OLAP-ответ"""
+    def _parse_olap_response(self, text: str) -> list:
+        """Распарсить OLAP-ответ в список dict"""
         text = text.strip()
-        logger.info(f"Парсим OLAP: длина={len(text)}, начало={text[:500]}")
-
         if not text:
-            return {"data": [], "raw": "Пустой ответ"}
+            return []
 
         # JSON
         if text.startswith("{") or text.startswith("["):
             try:
                 data = json.loads(text)
                 if isinstance(data, list):
-                    return {"data": data, "count": len(data)}
+                    return data
                 if isinstance(data, dict):
                     for key in ["data", "rows", "records", "items", "result"]:
                         if key in data and isinstance(data[key], list):
-                            return {"data": data[key], "count": len(data[key])}
-                    return {"data": [data] if data else [], "count": 1 if data else 0, "raw_json": data}
+                            return data[key]
+                    return [data] if data else []
             except json.JSONDecodeError:
                 pass
 
         # XML
         if text.startswith("<"):
-            return self._parse_olap_xml(text)
+            return self._parse_xml_rows(text)
 
         # CSV/TSV
         if "\t" in text:
-            return self._parse_olap_csv(text)
+            return self._parse_tsv_rows(text)
 
-        return {"data": [], "raw": text[:3000]}
+        logger.warning(f"Неизвестный формат OLAP: {text[:200]}")
+        return []
 
-    def _parse_olap_xml(self, xml_text: str) -> dict:
+    def _parse_xml_rows(self, xml_text: str) -> list:
         """Распарсить XML"""
         try:
             root = ET.fromstring(xml_text)
         except ET.ParseError:
-            return {"data": [], "raw": xml_text[:3000]}
+            return []
         rows = []
         for tag in [".//row", ".//record", ".//item", ".//r"]:
             found = root.findall(tag)
@@ -228,13 +150,13 @@ class IikoServerClient:
             for elem in root.iter():
                 if elem.attrib and elem.tag not in ['olap', 'report', 'result', 'response']:
                     rows.append(dict(elem.attrib))
-        return {"data": rows, "count": len(rows)}
+        return rows
 
-    def _parse_olap_csv(self, text: str) -> dict:
-        """Распарсить CSV/TSV"""
+    def _parse_tsv_rows(self, text: str) -> list:
+        """Распарсить TSV"""
         lines = text.strip().split("\n")
         if len(lines) < 2:
-            return {"data": [], "raw": text}
+            return []
         headers = lines[0].split("\t")
         rows = []
         for line in lines[1:]:
@@ -242,108 +164,193 @@ class IikoServerClient:
                 values = line.split("\t")
                 row = dict(zip(headers, values))
                 rows.append(row)
-        return {"data": rows, "headers": headers, "count": len(rows)}
+        return rows
 
-    # ─── Сводка для Claude ───────────────────────────────────────
+    # ─── Основной метод: несколько запросов ────────────────────────────────
+
+    async def get_olap_report(self, date_from: str, date_to: str,
+                              report_type: str = "SALES") -> str:
+        """
+        Обратная совместимость — возвращает raw текст.
+        Используется если кто-то вызывает старый метод.
+        """
+        await self._ensure_token()
+        json_body = {
+            "reportType": report_type,
+            "buildSummary": "false",
+            "groupByRowFields": ["OpenDate.Typed"],
+            "groupByColFields": [],
+            "aggregateFields": [
+                "DishDiscountSumInt", "DishAmountInt",
+                "DishSumInt", "UniqOrderId.OrdersCount"
+            ],
+            "filters": {
+                "OpenDate.Typed": {
+                    "filterType": "DateRange",
+                    "periodType": "CUSTOM",
+                    "from": date_from,
+                    "to": date_to,
+                    "includeLow": "true",
+                    "includeHigh": "true"
+                }
+            }
+        }
+        response = await self.client.post(
+            f"{self.server_url}/resto/api/v2/reports/olap",
+            params={"key": self.token},
+            json=json_body
+        )
+        response.raise_for_status()
+        return response.text
+
+    async def get_sales_data(self, date_from: str, date_to: str) -> dict:
+        """Получить данные о продажах — несколько маленьких запросов"""
+        try:
+            # Запрос 1: по дням (≈25 строк) — основные итоги
+            day_rows = await self._olap_request(
+                date_from, date_to,
+                group_fields=["OpenDate.Typed"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt", "UniqOrderId.OrdersCount"]
+            )
+            logger.info(f"По дням: {len(day_rows)} строк")
+
+            # Запрос 2: по официантам (≈10-20 строк)
+            waiter_rows = await self._olap_request(
+                date_from, date_to,
+                group_fields=["OrderWaiter.Name"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt", "UniqOrderId.OrdersCount"]
+            )
+            logger.info(f"По официантам: {len(waiter_rows)} строк")
+
+            # Запрос 3: по часам (≈15-20 строк)
+            hour_rows = await self._olap_request(
+                date_from, date_to,
+                group_fields=["HourOpen"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt", "UniqOrderId.OrdersCount"]
+            )
+            logger.info(f"По часам: {len(hour_rows)} строк")
+
+            # Запрос 4: по блюдам (≈100-200 строк)
+            dish_rows = await self._olap_request(
+                date_from, date_to,
+                group_fields=["DishName", "DishGroup"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt"]
+            )
+            logger.info(f"По блюдам: {len(dish_rows)} строк")
+
+            return {
+                "day_rows": day_rows,
+                "waiter_rows": waiter_rows,
+                "hour_rows": hour_rows,
+                "dish_rows": dish_rows,
+                "multi_query": True
+            }
+
+        except Exception as e:
+            logger.error(f"Ошибка OLAP: {e}")
+            return {"error": str(e)}
+
+    # ─── Сводка для Claude ─────────────────────────────────────────────────
 
     async def get_sales_summary(self, date_from: str, date_to: str) -> str:
-        """Сводка продаж зала"""
+        """Сводка продаж зала — точные данные из нескольких запросов"""
         data = await self.get_sales_data(date_from, date_to)
 
         if "error" in data:
             return f"⚠️ Ошибка данных зала: {data['error']}"
 
-        if "raw_json" in data and not data.get("data"):
-            raw = json.dumps(data["raw_json"], ensure_ascii=False, indent=2)
-            return f"📊 Данные зала (JSON):\n{raw[:3000]}"
-
-        rows = data.get("data", [])
-        if not rows:
-            raw = data.get("raw", "")
-            if raw:
-                return f"📊 Данные зала (сырой формат):\n{raw[:3000]}"
-            return "📊 Данные зала: нет заказов за этот период"
-
         lines = ["📊 === ДАННЫЕ ЗАЛА (iikoServer) ==="]
+
+        # ─── Итоги по дням ───
+        day_rows = data.get("day_rows", [])
         total_revenue = 0
         total_revenue_full = 0
         total_qty = 0
-        dish_data = []
+        total_orders = 0
 
-        for row in rows:
-            name = (row.get("DishName") or row.get("Блюдо") or "?")
-            group = (row.get("DishGroup") or row.get("Группа блюда") or "?")
-            amount = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+        day_stats = {}
+        for row in day_rows:
+            date = row.get("OpenDate.Typed") or row.get("Учетный день") or ""
             revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
             revenue_full = float(row.get("DishSumInt") or row.get("Сумма без скидки") or 0)
-            waiter = (row.get("OrderWaiter.Name") or row.get("Официант заказа") or "?")
-            orders = (row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
-            date = (row.get("OpenDate.Typed") or row.get("Учетный день") or "")
-            hour = (row.get("HourOpen") or row.get("Час открытия") or "")
+            qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+            orders = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
 
             total_revenue += revenue
             total_revenue_full += revenue_full
-            total_qty += amount
-            dish_data.append({
-                "name": name, "group": group, "qty": amount,
-                "revenue": revenue, "revenue_full": revenue_full,
-                "waiter": waiter, "orders": orders,
-                "date": date, "hour": hour
-            })
+            total_qty += qty
+            total_orders += orders
+
+            if date:
+                day_stats[date] = {
+                    "revenue": revenue, "revenue_full": revenue_full,
+                    "qty": qty, "orders": orders
+                }
 
         lines.append(f"Общая выручка зала (со скидкой): {total_revenue:.0f} руб.")
         lines.append(f"Общая выручка зала (без скидки): {total_revenue_full:.0f} руб.")
+        lines.append(f"Всего заказов: {total_orders:.0f}")
         lines.append(f"Всего продано: {total_qty:.0f} шт")
-        lines.append(f"Всего строк OLAP: {len(rows)}")
+        if total_orders > 0:
+            lines.append(f"Средний чек: {total_revenue / total_orders:.0f} руб.")
+        lines.append(f"Строк по дням: {len(day_rows)}")
         lines.append("")
 
-        # Продажи по блюдам
-        lines.append("Продажи по блюдам:")
-        sorted_dishes = sorted(dish_data, key=lambda x: x["revenue"], reverse=True)
-        for d in sorted_dishes[:30]:
-            parts = [f"  {d['name']}"]
-            parts.append(f"{d['qty']:.0f} шт")
-            parts.append(f"{d['revenue']:.0f} руб.")
-            if d['group'] != '?': parts.append(d['group'])
-            if d['waiter'] != '?': parts.append(d['waiter'])
-            if d['date']: parts.append(d['date'])
-            if d['hour']: parts.append(f"{d['hour']}ч")
-            lines.append(" | ".join(parts))
-
-        # Сотрудники
-        waiter_stats = defaultdict(lambda: {"revenue": 0, "orders": 0})
-        for d in dish_data:
-            waiter_stats[d["waiter"]]["revenue"] += d["revenue"]
-            waiter_stats[d["waiter"]]["orders"] += float(d.get("orders", 0) or 0)
-
-        lines.append("")
-        lines.append("Сотрудники:")
-        for name, stats in sorted(waiter_stats.items(), key=lambda x: x[1]["revenue"], reverse=True):
-            lines.append(f"  {name} | {stats['revenue']:.0f} руб. | {stats['orders']:.0f} заказов")
-
-        # По дням
-        day_stats = defaultdict(lambda: {"revenue": 0, "orders": 0})
-        for d in dish_data:
-            if d["date"]:
-                day_stats[d["date"]]["revenue"] += d["revenue"]
-                day_stats[d["date"]]["orders"] += float(d.get("orders", 0) or 0)
-
+        # ─── По дням ───
         if day_stats:
-            lines.append("")
             lines.append("По дням:")
             for day, stats in sorted(day_stats.items()):
                 lines.append(f"  {day} | {stats['revenue']:.0f} руб. | {stats['orders']:.0f} заказов")
 
-        # По часам
-        hour_stats = defaultdict(float)
-        for d in dish_data:
-            if d["hour"]:
-                hour_stats[d["hour"]] += d["revenue"]
-        if hour_stats:
+        # ─── Сотрудники ───
+        waiter_rows = data.get("waiter_rows", [])
+        if waiter_rows:
+            lines.append("")
+            lines.append("Сотрудники:")
+            waiter_list = []
+            for row in waiter_rows:
+                name = row.get("OrderWaiter.Name") or row.get("Официант заказа") or "?"
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                orders = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
+                waiter_list.append({"name": name, "revenue": revenue, "orders": orders})
+
+            for w in sorted(waiter_list, key=lambda x: x["revenue"], reverse=True):
+                avg_check = w["revenue"] / w["orders"] if w["orders"] > 0 else 0
+                lines.append(f"  {w['name']} | {w['revenue']:.0f} руб. | {w['orders']:.0f} заказов | ср.чек {avg_check:.0f}")
+
+        # ─── По часам ───
+        hour_rows = data.get("hour_rows", [])
+        if hour_rows:
             lines.append("")
             lines.append("По часам:")
-            for hour, rev in sorted(hour_stats.items()):
-                lines.append(f"  {hour}:00 | {rev:.0f} руб.")
+            hour_list = []
+            for row in hour_rows:
+                hour = row.get("HourOpen") or row.get("Час открытия") or ""
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                hour_list.append({"hour": hour, "revenue": revenue})
+
+            for h in sorted(hour_list, key=lambda x: x["hour"]):
+                lines.append(f"  {h['hour']}:00 | {h['revenue']:.0f} руб.")
+
+        # ─── Топ блюд ───
+        dish_rows = data.get("dish_rows", [])
+        if dish_rows:
+            lines.append("")
+            lines.append(f"Продажи по блюдам (всего {len(dish_rows)} позиций):")
+            dish_list = []
+            for row in dish_rows:
+                name = row.get("DishName") or row.get("Блюдо") or "?"
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                dish_list.append({"name": name, "group": group, "revenue": revenue, "qty": qty})
+
+            for d in sorted(dish_list, key=lambda x: x["revenue"], reverse=True)[:30]:
+                lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб. | {d['group']}")
 
         return "\n".join(lines)
 
