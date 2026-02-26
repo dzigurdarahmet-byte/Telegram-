@@ -762,9 +762,9 @@ class IikoServerClient:
         iiko_salary = staff.get("avg_salary", 0)
         iiko_cook_count = staff.get("count", 0)
 
-        # Приоритет: зарплата из iiko → фолбэк из конфига
+        # Приоритет: данные из iiko → фолбэк из конфига
         effective_salary = iiko_salary if iiko_salary > 0 else cook_salary
-        effective_cooks = cooks_per_shift if cooks_per_shift > 0 else iiko_cook_count
+        effective_cooks = iiko_cook_count if iiko_cook_count > 0 else cooks_per_shift
 
         lines = [f"📊 === ПРОИЗВОДИТЕЛЬНОСТЬ КУХНИ ({date_from} — {date_to}) ==="]
 
@@ -912,7 +912,7 @@ class IikoServerClient:
         dish_group_rows = data.get("dish_group_rows", [])
         if effective_cooks > 0 and effective_salary > 0 and dish_group_rows:
             salary_source = "iiko" if iiko_salary > 0 else "конфиг (.env)"
-            cooks_source = "конфиг (.env)" if cooks_per_shift > 0 else f"iiko ({iiko_cook_count} чел.)"
+            cooks_source = f"iiko, роль {cook_role_codes}" if iiko_cook_count > 0 else "конфиг (.env)"
 
             lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ===")
             lines.append(f"  Поваров в смене: {effective_cooks} (источник: {cooks_source})")
