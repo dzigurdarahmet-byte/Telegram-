@@ -300,14 +300,14 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_debugemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отладка: структура сотрудников"""
+    """Отладка: роли и зарплаты сотрудников"""
     if not check_access(update.effective_user.id):
         return
-    msg = await update.message.reply_text("🔍 Загружаю сотрудников...")
+    msg = await update.message.reply_text("🔍 Загружаю роли и зарплаты...")
     try:
         if iiko_server:
-            raw = await iiko_server.get_employees_debug()
-            await msg.edit_text(f"👥 Сотрудники:\n\n{raw[:3900]}")
+            raw = await iiko_server.get_roles_debug()
+            await msg.edit_text(f"👥 Роли и зарплаты:\n\n{raw[:3900]}")
         else:
             await msg.edit_text("Локальный сервер не настроен")
     except Exception as e:

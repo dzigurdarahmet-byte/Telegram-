@@ -435,6 +435,45 @@ class IikoServerClient:
             logger.warning(f"Не удалось получить сотрудников: {e}")
             return []
 
+    async def get_roles_debug(self) -> str:
+        """Отладка: список ролей/должностей"""
+        lines = []
+        # Роли
+        try:
+            text = await self._get("/resto/api/v2/entities/employees/role/list")
+            if text.strip().startswith("["):
+                roles = json.loads(text)
+                lines.append(f"Роли ({len(roles)}):")
+                for r in roles:
+                    code = r.get("code", "?")
+                    name = r.get("name", "?")
+                    lines.append(f"  {code} → {name}")
+            elif text.strip().startswith("<"):
+                root = ET.fromstring(text)
+                roles = root.findall(".//role") or root.findall(".//*")
+                lines.append(f"Роли (XML, {len(roles)}):")
+                for r in roles[:30]:
+                    code = r.findtext("code") or r.get("code", "")
+                    name = r.findtext("name") or r.get("name", "")
+                    if name:
+                        lines.append(f"  {code} → {name}")
+        except Exception as e:
+            lines.append(f"Роли: ошибка {e}")
+
+        # Попытка получить зарплаты
+        salary_endpoints = [
+            "/resto/api/v2/employees/schedule",
+            "/resto/api/v2/reports/payroll",
+        ]
+        for ep in salary_endpoints:
+            try:
+                text = await self._get(ep)
+                lines.append(f"\n{ep}: {text[:300]}")
+            except Exception as e:
+                lines.append(f"\n{ep}: {e}")
+
+        return "\n".join(lines)
+
     async def get_employees_debug(self) -> str:
         """Отладка: показать полную структуру сотрудников"""
         try:
