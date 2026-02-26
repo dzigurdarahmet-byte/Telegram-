@@ -660,76 +660,77 @@ class IikoServerClient:
                     err = str(e)[:80]
                     lines.append(f"❌ {ep}: {err}")
 
-        # ═══ 4. OLAP — разные типы отчётов ═══
-        lines.append("\n═══ OLAP ОТЧЁТЫ (ставки, часы) ═══")
+        # ═══ 4. Список ВСЕХ доступных полей OLAP ═══
+        lines.append("\n═══ ВСЕ ПОЛЯ OLAP (SALES) ═══")
         yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         today = datetime.now().strftime("%Y-%m-%d")
 
-        # Попробовать разные типы OLAP-отчётов
-        olap_report_types = [
-            "EMPLOYEE_ATTENDANCES",
-            "STAFF",
-            "PAYROLL",
-            "LIVEATTENDANCE",
-            "TRANSACTIONS",
-        ]
-        for rt in olap_report_types:
+        await self._ensure_token()
+        # Пробуем получить колонки с параметром reportType
+        for rt in ["SALES", "EMPLOYEE_ATTENDANCES", "TRANSACTIONS"]:
             try:
-                await self._ensure_token()
-                json_body = {
-                    "reportType": rt,
-                    "buildSummary": "false",
-                    "groupByRowFields": [],
-                    "groupByColFields": [],
-                    "aggregateFields": [],
-                    "filters": {
-                        "OpenDate.Typed": {
-                            "filterType": "DateRange",
-                            "periodType": "CUSTOM",
-                            "from": yesterday,
-                            "to": today,
-                            "includeLow": "true",
-                            "includeHigh": "true"
-                        }
-                    }
-                }
-                response = await self.client.post(
-                    f"{self.server_url}/resto/api/v2/reports/olap",
-                    params={"key": self.token},
-                    json=json_body
+                response = await self.client.get(
+                    f"{self.server_url}/resto/api/v2/reports/olap/columns",
+                    params={"key": self.token, "reportType": rt}
                 )
                 if response.status_code == 200:
-                    preview = response.text[:500].replace("\n", " ")
-                    lines.append(f"✅ {rt}: {preview}")
+                    text = response.text
+                    lines.append(f"✅ Колонки {rt} ({len(text)} байт):")
+                    # Парсим — может быть JSON или XML
+                    if text.strip().startswith("[") or text.strip().startswith("{"):
+                        try:
+                            data = json.loads(text)
+                            if isinstance(data, list):
+                                # Ищем поля со словами wage/salary/rate/hour/attend
+                                wage_fields = []
+                                all_names = []
+                                for col in data:
+                                    name = col if isinstance(col, str) else (col.get("name") or col.get("id") or str(col))
+                                    all_names.append(name)
+                                    name_lower = name.lower()
+                                    if any(kw in name_lower for kw in [
+                                        "wage", "salary", "rate", "hour", "attend",
+                                        "sched", "shift", "ставк", "зарпл", "час",
+                                        "смен", "отработ", "табел",
+                                    ]):
+                                        wage_fields.append(name)
+                                if wage_fields:
+                                    lines.append(f"  ЗАРПЛАТНЫЕ ПОЛЯ: {', '.join(wage_fields)}")
+                                lines.append(f"  Всего полей: {len(all_names)}")
+                                lines.append(f"  Все поля: {', '.join(all_names[:80])}")
+                                if len(all_names) > 80:
+                                    lines.append(f"  ... ещё {len(all_names) - 80}")
+                            elif isinstance(data, dict):
+                                lines.append(f"  Ключи: {', '.join(list(data.keys())[:30])}")
+                                # Показать содержимое
+                                for key, val in data.items():
+                                    if isinstance(val, list) and val:
+                                        wage_items = []
+                                        all_items = []
+                                        for item in val:
+                                            name = item if isinstance(item, str) else (item.get("name") or item.get("id") or str(item))
+                                            all_items.append(str(name))
+                                            if any(kw in str(name).lower() for kw in [
+                                                "wage", "salary", "rate", "hour", "attend",
+                                                "sched", "shift", "ставк", "зарпл", "час",
+                                                "смен", "отработ",
+                                            ]):
+                                                wage_items.append(str(name))
+                                        if wage_items:
+                                            lines.append(f"  {key} ЗАРПЛАТНЫЕ: {', '.join(wage_items)}")
+                                        lines.append(f"  {key} ({len(all_items)}): {', '.join(all_items[:50])}")
+                        except json.JSONDecodeError:
+                            lines.append(f"  Raw: {text[:800]}")
+                    else:
+                        lines.append(f"  Raw: {text[:800]}")
                 else:
-                    lines.append(f"❌ {rt}: {response.status_code}")
+                    lines.append(f"❌ Колонки {rt}: {response.status_code} {response.text[:100]}")
             except Exception as e:
-                lines.append(f"❌ {rt}: {str(e)[:80]}")
+                lines.append(f"❌ Колонки {rt}: {str(e)[:100]}")
 
-        # ═══ 5. Доступные колонки OLAP ═══
-        lines.append("\n═══ OLAP КОЛОНКИ (список полей) ═══")
-        olap_column_endpoints = [
-            "/resto/api/v2/reports/olap/columns",
-            "/resto/api/v2/reports/olap/reportTypes",
-            "/resto/api/v2/reports/olap/filters",
-        ]
-        for ep in olap_column_endpoints:
-            try:
-                text = await self._get(ep)
-                preview = text[:500].replace("\n", " ")
-                lines.append(f"✅ {ep}: {preview}")
-            except Exception as e:
-                lines.append(f"❌ {ep}: {str(e)[:80]}")
-
-        # ═══ 6. Ещё эндпоинты для расписания/ставок ═══
+        # ═══ 5. Ещё эндпоинты для расписания/ставок ═══
         lines.append("\n═══ ДОПОЛНИТЕЛЬНЫЕ ЭНДПОИНТЫ ═══")
         extra_endpoints = [
-            "/resto/api/v2/catering/olap/employeeAttendances",
-            "/resto/api/v2/employees/attendances",
-            "/resto/api/v2/schedule",
-            "/resto/api/employees/staffRates",
-            "/resto/api/v2/entities/employees/rates",
-            "/resto/api/corporation/schedules",
         ]
         for ep in extra_endpoints:
             try:
