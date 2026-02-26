@@ -200,64 +200,27 @@ class IikoClient:
         except Exception as e:
             logger.warning(f"deliveries не сработал: {e}")
 
-        # Способ 2: Заказы зала — пробуем разные форматы
-        table_endpoints = [
-            ("order/by_table (v1)", "/api/1/order/by_table", {
-                "organizationIds": [org_id],
-                "dateFrom": date_from,
-                "dateTo": date_to,
-                "statuses": ["Closed"]
-            }),
-            ("order/by_table (v2)", "/api/1/order/by_table", {
-                "organizationIds": [org_id],
-                "tableIds": [],
-                "dateFrom": f"{date_from}T00:00:00.000",
-                "dateTo": f"{date_to}T23:59:59.999",
-                "statuses": ["Closed", "Bill"]
-            }),
-            ("deliveries (all statuses)", "/api/1/deliveries/by_delivery_date_and_status", {
+        # Способ 2: Заказы доставки — все статусы (на случай если первый запрос не вернул все)
+        try:
+            methods_tried.append("deliveries (all statuses)")
+            data = await self._safe_post("/api/1/deliveries/by_delivery_date_and_status", {
                 "organizationIds": [org_id],
                 "deliveryDateFrom": f"{date_from} 00:00:00.000",
                 "deliveryDateTo": f"{date_to} 23:59:59.999",
                 "statuses": ["Unconfirmed", "WaitCooking", "ReadyForCooking",
                              "CookingStarted", "CookingCompleted", "Waiting",
                              "OnWay", "Delivered", "Closed", "Cancelled"]
-            }),
-        ]
-        for ep_name, ep_url, ep_payload in table_endpoints:
-            try:
-                methods_tried.append(ep_name)
-                data = await self._safe_post(ep_url, ep_payload)
-                if data:
-                    for org_data in data.get("ordersByOrganizations", []):
-                        orders = org_data.get("orders", [])
-                        # Не добавляем дубли
-                        existing_ids = {o.get("id") or o.get("correlationId") for o in all_orders}
-                        new_orders = [o for o in orders if (o.get("id") or o.get("correlationId")) not in existing_ids]
-                        all_orders.extend(new_orders)
-                        if new_orders:
-                            methods_success.append(f"{ep_name}: {len(new_orders)} новых заказов")
-            except Exception as e:
-                logger.warning(f"{ep_name} не сработал: {e}")
-
-        # Способ 3: OLAP (на случай если доступен)
-        try:
-            methods_tried.append("olap/by_dishes")
-            data = await self._safe_post("/api/1/olap/by_dishes", {
-                "organizationId": org_id,
-                "dateFrom": date_from,
-                "dateTo": date_to,
-                "groupByRowFields": ["DishName", "DishGroup", "Waiter.Name"],
-                "groupByColFields": [],
-                "aggregateFields": ["DishAmountInt", "DishSumInt"],
-                "filters": {}
             })
-            if data and data.get("data"):
-                methods_success.append(f"OLAP: {len(data.get('data', []))} строк")
-                # Конвертируем OLAP в формат заказов
-                self._olap_data = data
+            if data:
+                for org_data in data.get("ordersByOrganizations", []):
+                    orders = org_data.get("orders", [])
+                    existing_ids = {o.get("id") or o.get("correlationId") for o in all_orders}
+                    new_orders = [o for o in orders if (o.get("id") or o.get("correlationId")) not in existing_ids]
+                    all_orders.extend(new_orders)
+                    if new_orders:
+                        methods_success.append(f"deliveries (all): {len(new_orders)} новых заказов")
         except Exception as e:
-            logger.warning(f"OLAP не сработал: {e}")
+            logger.warning(f"deliveries (all) не сработал: {e}")
 
         logger.info(f"Пробовали: {methods_tried}. Успешно: {methods_success}. Всего заказов: {len(all_orders)}")
 
@@ -271,6 +234,16 @@ class IikoClient:
         return all_orders
 
     # ─── Анализ заказов ────────────────────────────────────
+
+    @staticmethod
+    def _safe_float(value) -> float:
+        """Безопасное преобразование в float"""
+        if value is None:
+            return 0.0
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0
 
     async def _analyze_orders(self, orders: list) -> dict:
         product_map = await self._get_product_map()
@@ -288,13 +261,32 @@ class IikoClient:
             # Позиции заказа
             items = order_obj.get("items", [])
             for item in items:
-                product_id = item.get("productId") or item.get("product", {}).get("id", "")
-                amount = item.get("amount", 1)
-                price = item.get("price", 0) or item.get("resultSum", 0) or item.get("sum", 0)
-                item_sum = price * amount if price else 0
+                product = item.get("product") or {}
+                product_id = (item.get("productId")
+                              or product.get("id")
+                              or item.get("id", ""))
+                amount = self._safe_float(item.get("amount") or 1)
+
+                # Цена: пробуем все возможные поля
+                cost = self._safe_float(item.get("cost"))
+                result_sum = self._safe_float(item.get("resultSum"))
+                price = self._safe_float(item.get("price"))
+                item_sum_direct = self._safe_float(item.get("sum"))
+
+                if cost > 0:
+                    item_sum = cost
+                elif result_sum > 0:
+                    item_sum = result_sum
+                elif item_sum_direct > 0:
+                    item_sum = item_sum_direct
+                elif price > 0:
+                    item_sum = price * amount
+                else:
+                    item_sum = 0
 
                 product_info = product_map.get(product_id, {})
                 dish_name = (item.get("name")
+                             or product.get("name")
                              or product_info.get("name")
                              or item.get("productName")
                              or "Неизвестно")
@@ -305,10 +297,12 @@ class IikoClient:
                 dish_sales[dish_name]["group"] = dish_group
                 order_sum += item_sum
 
-            # Сумма заказа
+            # Сумма заказа — фолбэк на общую сумму
             if order_sum == 0:
-                order_sum = (order_obj.get("sum", 0)
-                             or order_obj.get("resultSum", 0)
+                order_sum = (self._safe_float(order_obj.get("sum"))
+                             or self._safe_float(order_obj.get("resultSum"))
+                             or self._safe_float(order.get("sum"))
+                             or self._safe_float(order.get("resultSum"))
                              or 0)
             total_revenue += order_sum
 
@@ -316,9 +310,15 @@ class IikoClient:
             waiter = (order_obj.get("waiter")
                       or order_obj.get("operator")
                       or order.get("waiter")
-                      or order.get("operator"))
+                      or order.get("operator")
+                      or order.get("courier"))
             if waiter and isinstance(waiter, dict):
-                waiter_name = waiter.get("name") or waiter.get("firstName", "Неизвестно")
+                waiter_name = (waiter.get("name")
+                               or waiter.get("firstName")
+                               or waiter.get("displayName")
+                               or "Неизвестно")
+            elif isinstance(waiter, str):
+                waiter_name = waiter
             else:
                 waiter_name = "Не указан"
             waiter_stats[waiter_name]["orders"] += 1
@@ -327,7 +327,8 @@ class IikoClient:
             # Час заказа
             created = (order_obj.get("whenCreated")
                        or order_obj.get("createdAt")
-                       or order.get("whenCreated", ""))
+                       or order.get("whenCreated")
+                       or order.get("completeBefore", ""))
             if created and len(str(created)) >= 13:
                 try:
                     hour = str(created)[11:13]
@@ -345,6 +346,31 @@ class IikoClient:
             "waiter_stats": dict(waiter_stats),
             "hourly": dict(hourly)
         }
+
+    async def get_raw_order_sample(self) -> str:
+        """Вернуть JSON-структуру первого найденного заказа для отладки"""
+        org_id = await self.get_organization_id()
+        today = datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+        data = await self._post("/api/1/deliveries/by_delivery_date_and_status", {
+            "organizationIds": [org_id],
+            "deliveryDateFrom": f"{yesterday} 00:00:00.000",
+            "deliveryDateTo": f"{today} 23:59:59.999",
+            "statuses": [
+                "Unconfirmed", "WaitCooking", "ReadyForCooking",
+                "CookingStarted", "CookingCompleted", "Waiting",
+                "OnWay", "Delivered", "Closed"
+            ]
+        })
+
+        for org in data.get("ordersByOrganizations", []):
+            orders = org.get("orders", [])
+            if orders:
+                sample = orders[0]
+                return json.dumps(sample, ensure_ascii=False, indent=2, default=str)[:3900]
+
+        return "Заказов не найдено"
 
     def _format_analysis(self, analysis: dict, label: str, date_from: str, date_to: str) -> str:
         lines = [f"📊 Данные за период: {label} ({date_from} — {date_to})"]
@@ -519,27 +545,7 @@ class IikoClient:
                              "CookingStarted", "CookingCompleted", "Waiting",
                              "OnWay", "Delivered", "Closed"]
             }),
-            ("olap/by_dishes", "/api/1/olap/by_dishes", {
-                "organizationId": org_id,
-                "dateFrom": yesterday,
-                "dateTo": today,
-                "groupByRowFields": ["DishName"],
-                "groupByColFields": [],
-                "aggregateFields": ["DishAmountInt", "DishSumInt"],
-                "filters": {}
-            }),
         ]
-
-        # Тест заказов зала
-        try:
-            endpoints.append(("order/by_table", "/api/1/order/by_table", {
-                "organizationIds": [org_id],
-                "dateFrom": yesterday,
-                "dateTo": today,
-                "statuses": ["Closed"]
-            }))
-        except Exception:
-            pass
 
         for name, endpoint, payload in endpoints:
             try:

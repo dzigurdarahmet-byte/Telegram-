@@ -219,6 +219,18 @@ async def cmd_abc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать raw структуру заказа для отладки"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔍 Загружаю пример заказа...")
+    try:
+        raw = await iiko_cloud.get_raw_order_sample()
+        await msg.edit_text(f"📋 Структура заказа:\n\n<pre>{raw[:3900]}</pre>", parse_mode="HTML")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
         return
@@ -347,6 +359,7 @@ def main():
     app.add_handler(CommandHandler("staff", cmd_staff))
     app.add_handler(CommandHandler("abc", cmd_abc))
     app.add_handler(CommandHandler("diag", cmd_diag))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
