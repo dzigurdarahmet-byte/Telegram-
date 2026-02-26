@@ -575,65 +575,130 @@ class IikoServerClient:
 
         return result
 
-    async def get_cook_salary_debug(self, cook_role_codes: list = None) -> str:
-        """Отладка: все поля сотрудников-поваров из iiko"""
+    def _xml_to_text(self, elem, indent=0) -> list:
+        """Рекурсивно извлечь все поля из XML-элемента"""
         lines = []
+        prefix = "  " * indent
+        for child in elem:
+            text = (child.text or "").strip()
+            has_children = len(list(child)) > 0
+            if has_children:
+                lines.append(f"{prefix}{child.tag}:")
+                lines.extend(self._xml_to_text(child, indent + 1))
+            elif text and len(text) < 300:
+                lines.append(f"{prefix}{child.tag}: {text}")
+        return lines
+
+    async def get_cook_salary_debug(self, cook_role_codes: list = None) -> str:
+        """Отладка: глубокий поиск ставок и часов поваров в iiko"""
+        lines = []
+
+        # ═══ 1. Полный XML поваров (с вложенными элементами) ═══
         try:
             text = await self._get("/resto/api/employees")
             root = ET.fromstring(text)
 
-            # Показать все доступные поля
-            sample_emp = root.find(".//employee")
-            if sample_emp is not None:
-                fields = [child.tag for child in sample_emp]
-                lines.append(f"Все поля сотрудника ({len(fields)}):")
-                lines.append(f"  {', '.join(fields)}")
-                lines.append("")
-
-            # Найти поваров и показать все их поля
             cook_count = 0
+            cook_ids = []
             for emp in root.findall(".//employee"):
                 deleted = emp.findtext("deleted") or "false"
                 if deleted == "true":
                     continue
-
                 role_code = (emp.findtext("mainRoleCode") or "").strip()
-                role_lower = role_code.lower()
-
-                is_cook = False
-                if cook_role_codes:
-                    is_cook = role_lower in [c.lower() for c in cook_role_codes]
-                else:
-                    cook_keywords = ["cook", "повар", "шеф", "chef", "кухн", "kitchen"]
-                    is_cook = any(kw in role_lower for kw in cook_keywords)
-
+                is_cook = role_code.lower() in [c.lower() for c in (cook_role_codes or [])]
+                if not cook_role_codes:
+                    is_cook = any(kw in role_code.lower() for kw in ["cook", "повар", "шеф", "pov"])
                 if not is_cook:
                     continue
-
                 cook_count += 1
-                if cook_count <= 3:  # Показать первых 3
+                cook_ids.append(emp.findtext("id") or "")
+                if cook_count <= 2:
                     name = emp.findtext("name") or "?"
-                    lines.append(f"--- Повар #{cook_count}: {name} (роль: {role_code}) ---")
-                    for child in emp:
-                        val = (child.text or "").strip()
-                        if val and len(val) < 200:
-                            lines.append(f"  {child.tag}: {val}")
+                    lines.append(f"═══ Повар #{cook_count}: {name} ({role_code}) ═══")
+                    lines.extend(self._xml_to_text(emp, indent=1))
+                    lines.append("")
 
-            lines.append(f"\nВсего поваров найдено: {cook_count}")
-            if cook_count == 0:
-                # Показать все роли для настройки
-                roles = set()
-                for emp in root.findall(".//employee"):
-                    deleted = emp.findtext("deleted") or "false"
-                    if deleted == "true":
-                        continue
-                    role = emp.findtext("mainRoleCode") or "?"
-                    roles.add(role)
-                lines.append(f"Все роли в системе: {', '.join(sorted(roles))}")
-                lines.append("Укажите нужные в COOK_ROLE_CODES")
-
+            lines.append(f"Всего поваров (роль POV): {cook_count}")
         except Exception as e:
-            lines.append(f"Ошибка: {e}")
+            lines.append(f"Ошибка employees: {e}")
+            cook_ids = []
+
+        # ═══ 2. Эндпоинты зарплат/расписания ═══
+        wage_endpoints = [
+            "/resto/api/v2/schedule/events",
+            "/resto/api/v2/employees/wages",
+            "/resto/api/employees/payroll",
+            "/resto/api/corporation/employees",
+            "/resto/api/v2/schedule/resultingSchedule",
+        ]
+        lines.append("\n═══ ПОИСК ЭНДПОИНТОВ ЗАРПЛАТ ═══")
+        for ep in wage_endpoints:
+            try:
+                text = await self._get(ep)
+                preview = text[:300].replace("\n", " ")
+                lines.append(f"✅ {ep}: {preview}")
+            except Exception as e:
+                err = str(e)[:80]
+                lines.append(f"❌ {ep}: {err}")
+
+        # ═══ 3. Эндпоинты для конкретного повара ═══
+        if cook_ids:
+            emp_id = cook_ids[0]
+            per_employee_eps = [
+                f"/resto/api/employees/{emp_id}",
+                f"/resto/api/v2/employees/{emp_id}",
+                f"/resto/api/v2/employees/{emp_id}/wages",
+                f"/resto/api/v2/employees/{emp_id}/schedule",
+            ]
+            lines.append(f"\n═══ ДАННЫЕ ПОВАРА {emp_id[:8]}... ═══")
+            for ep in per_employee_eps:
+                try:
+                    text = await self._get(ep)
+                    preview = text[:400].replace("\n", " ")
+                    lines.append(f"✅ {ep}:\n  {preview}")
+                except Exception as e:
+                    err = str(e)[:80]
+                    lines.append(f"❌ {ep}: {err}")
+
+        # ═══ 4. OLAP с зарплатными полями ═══
+        lines.append("\n═══ OLAP ЗАРПЛАТНЫЕ ПОЛЯ ═══")
+        yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # Попробовать разные OLAP-запросы
+        olap_attempts = [
+            {
+                "name": "SALES + Waiter wage fields",
+                "groups": ["OrderWaiter.Name"],
+                "aggs": ["DishSumInt", "UniqOrderId.OrdersCount",
+                         "OrderWaiter.Wage", "OrderWaiter.Rate",
+                         "WaiterWage", "PayRate"],
+            },
+            {
+                "name": "SALES + час + официант",
+                "groups": ["OrderWaiter.Name", "OpenDate.Typed"],
+                "aggs": ["DishSumInt", "HoursWorked", "ShiftHours",
+                         "WorkHours", "EmployeeHours"],
+            },
+        ]
+        for attempt in olap_attempts:
+            try:
+                rows = await self._olap_request(
+                    yesterday, today,
+                    group_fields=attempt["groups"],
+                    aggregate_fields=attempt["aggs"],
+                )
+                if rows:
+                    lines.append(f"✅ {attempt['name']}: {len(rows)} строк")
+                    sample = rows[0] if rows else {}
+                    lines.append(f"  Поля: {', '.join(sample.keys())}")
+                    for row in rows[:3]:
+                        lines.append(f"  {row}")
+                else:
+                    lines.append(f"⚠️ {attempt['name']}: пусто")
+            except Exception as e:
+                err = str(e)[:100]
+                lines.append(f"❌ {attempt['name']}: {err}")
 
         return "\n".join(lines)
 
