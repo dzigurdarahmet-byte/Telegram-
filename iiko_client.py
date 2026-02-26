@@ -364,6 +364,38 @@ class IikoClient:
             "hourly": dict(hourly)
         }
 
+    async def get_stop_list_debug(self) -> str:
+        """Отладка стоп-листа: показать сырые данные и совпадения с номенклатурой"""
+        data = await self.get_stop_lists()
+        self._nomenclature_cache = None
+        product_map = await self._get_product_map()
+
+        lines = [f"Номенклатура: {len(product_map)} записей в карте"]
+        lines.append("")
+
+        count = 0
+        for org_data in data.get("terminalGroupStopLists", []):
+            for tg in org_data.get("items", []):
+                for item in tg.get("items", []):
+                    if count >= 10:
+                        break
+                    pid = item.get("productId", "?")
+                    balance = item.get("balance", "?")
+                    found = product_map.get(pid)
+                    if found:
+                        lines.append(f"✅ {pid[:12]}... → {found['name']}")
+                    else:
+                        lines.append(f"❌ {pid} → НЕ НАЙДЕНО")
+                    count += 1
+
+        # Показать пример ключей из product_map
+        lines.append("")
+        lines.append("Примеры ID в номенклатуре:")
+        for i, key in enumerate(list(product_map.keys())[:5]):
+            lines.append(f"  {key[:12]}... → {product_map[key]['name']}")
+
+        return "\n".join(lines)
+
     async def get_raw_order_sample(self) -> str:
         """Вернуть JSON-структуру первого найденного заказа для отладки"""
         org_id = await self.get_organization_id()
