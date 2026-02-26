@@ -20,7 +20,7 @@ from config import (
     TELEGRAM_BOT_TOKEN, IIKO_API_LOGIN, ANTHROPIC_API_KEY,
     ALLOWED_USERS, ADMIN_CHAT_ID,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
-    COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT,
+    COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
 )
 
 logging.basicConfig(
@@ -331,6 +331,7 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 date_from, date_to,
                 cooks_per_shift=COOKS_PER_SHIFT,
                 cook_salary=COOK_SALARY_PER_SHIFT,
+                cook_role_codes=COOK_ROLE_CODES,
             )
             parts.append(cook_data)
         else:
@@ -372,6 +373,21 @@ async def cmd_debugemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if iiko_server:
             raw = await iiko_server.get_roles_debug()
             await msg.edit_text(f"👥 Роли и зарплаты:\n\n{raw[:3900]}")
+        else:
+            await msg.edit_text("Локальный сервер не настроен")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_debugcooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отладка: поля поваров из iiko (для настройки зарплаты)"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔍 Ищу поваров в iiko...")
+    try:
+        if iiko_server:
+            raw = await iiko_server.get_cook_salary_debug(COOK_ROLE_CODES)
+            await msg.edit_text(f"👨‍🍳 Повара в iiko:\n\n{raw[:3900]}")
         else:
             await msg.edit_text("Локальный сервер не настроен")
     except Exception as e:
@@ -525,6 +541,7 @@ def main():
     app.add_handler(CommandHandler("groups", cmd_groups))
     app.add_handler(CommandHandler("cooks", cmd_cooks))
     app.add_handler(CommandHandler("debugemp", cmd_debugemp))
+    app.add_handler(CommandHandler("debugcooks", cmd_debugcooks))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

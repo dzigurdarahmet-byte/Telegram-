@@ -495,6 +495,148 @@ class IikoServerClient:
 
     # ─── Производительность поваров ───────────────────────────────────────
 
+    async def get_cook_staff_data(self, cook_role_codes: list = None) -> dict:
+        """
+        Получить поваров и их зарплаты из iiko.
+        Возвращает: {"cooks": [...], "avg_salary": float, "count": int}
+        """
+        result = {"cooks": [], "avg_salary": 0, "count": 0, "source": ""}
+
+        try:
+            text = await self._get("/resto/api/employees")
+            root = ET.fromstring(text)
+
+            # Все поля первого сотрудника — для отладки
+            all_fields = set()
+            for emp in root.findall(".//employee"):
+                for child in emp:
+                    all_fields.add(child.tag)
+            result["available_fields"] = sorted(all_fields)
+
+            # Собираем поваров
+            for emp in root.findall(".//employee"):
+                deleted = emp.findtext("deleted") or "false"
+                if deleted == "true":
+                    continue
+
+                role_code = (emp.findtext("mainRoleCode") or "").strip()
+                name = emp.findtext("name") or "?"
+
+                # Определяем, повар ли это
+                is_cook = False
+                if cook_role_codes:
+                    is_cook = role_code.lower() in [c.lower() for c in cook_role_codes]
+                else:
+                    # Автодетект по типичным кодам/названиям
+                    role_lower = role_code.lower()
+                    cook_keywords = ["cook", "повар", "шеф", "chef", "кухн", "kitchen"]
+                    is_cook = any(kw in role_lower for kw in cook_keywords)
+
+                if not is_cook:
+                    continue
+
+                # Ищем зарплату во всех возможных полях
+                salary = 0
+                salary_field = ""
+                salary_fields = [
+                    "wage", "salary", "shiftSalary", "ratePerShift",
+                    "ratePerHour", "baseSalary", "payRate",
+                    "mainRateValue", "rateValue", "rate",
+                ]
+                for field in salary_fields:
+                    val = emp.findtext(field)
+                    if val:
+                        try:
+                            salary = float(val)
+                            salary_field = field
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+                result["cooks"].append({
+                    "name": name,
+                    "role": role_code,
+                    "salary": salary,
+                    "salary_field": salary_field,
+                })
+
+            # Считаем среднюю зарплату
+            cooks_with_salary = [c for c in result["cooks"] if c["salary"] > 0]
+            result["count"] = len(result["cooks"])
+            if cooks_with_salary:
+                result["avg_salary"] = sum(c["salary"] for c in cooks_with_salary) / len(cooks_with_salary)
+                result["source"] = f"iiko (поле: {cooks_with_salary[0]['salary_field']})"
+            else:
+                result["source"] = "не найдено в iiko"
+
+        except Exception as e:
+            logger.warning(f"Ошибка получения данных поваров: {e}")
+            result["error"] = str(e)
+
+        return result
+
+    async def get_cook_salary_debug(self, cook_role_codes: list = None) -> str:
+        """Отладка: все поля сотрудников-поваров из iiko"""
+        lines = []
+        try:
+            text = await self._get("/resto/api/employees")
+            root = ET.fromstring(text)
+
+            # Показать все доступные поля
+            sample_emp = root.find(".//employee")
+            if sample_emp is not None:
+                fields = [child.tag for child in sample_emp]
+                lines.append(f"Все поля сотрудника ({len(fields)}):")
+                lines.append(f"  {', '.join(fields)}")
+                lines.append("")
+
+            # Найти поваров и показать все их поля
+            cook_count = 0
+            for emp in root.findall(".//employee"):
+                deleted = emp.findtext("deleted") or "false"
+                if deleted == "true":
+                    continue
+
+                role_code = (emp.findtext("mainRoleCode") or "").strip()
+                role_lower = role_code.lower()
+
+                is_cook = False
+                if cook_role_codes:
+                    is_cook = role_lower in [c.lower() for c in cook_role_codes]
+                else:
+                    cook_keywords = ["cook", "повар", "шеф", "chef", "кухн", "kitchen"]
+                    is_cook = any(kw in role_lower for kw in cook_keywords)
+
+                if not is_cook:
+                    continue
+
+                cook_count += 1
+                if cook_count <= 3:  # Показать первых 3
+                    name = emp.findtext("name") or "?"
+                    lines.append(f"--- Повар #{cook_count}: {name} (роль: {role_code}) ---")
+                    for child in emp:
+                        val = (child.text or "").strip()
+                        if val and len(val) < 200:
+                            lines.append(f"  {child.tag}: {val}")
+
+            lines.append(f"\nВсего поваров найдено: {cook_count}")
+            if cook_count == 0:
+                # Показать все роли для настройки
+                roles = set()
+                for emp in root.findall(".//employee"):
+                    deleted = emp.findtext("deleted") or "false"
+                    if deleted == "true":
+                        continue
+                    role = emp.findtext("mainRoleCode") or "?"
+                    roles.add(role)
+                lines.append(f"Все роли в системе: {', '.join(sorted(roles))}")
+                lines.append("Укажите нужные в COOK_ROLE_CODES")
+
+        except Exception as e:
+            lines.append(f"Ошибка: {e}")
+
+        return "\n".join(lines)
+
     async def get_cook_productivity_data(self, date_from: str, date_to: str) -> dict:
         """Данные для отчёта производительности кухни/поваров"""
         results = {}
@@ -607,14 +749,37 @@ class IikoServerClient:
 
     async def get_cook_productivity_summary(self, date_from: str, date_to: str,
                                               cooks_per_shift: int = 0,
-                                              cook_salary: float = 0) -> str:
+                                              cook_salary: float = 0,
+                                              cook_role_codes: list = None) -> str:
         """Сводка производительности кухни/поваров для Claude"""
         data = await self.get_cook_productivity_data(date_from, date_to)
 
         if "error" in data:
             return f"⚠️ Ошибка: {data['error']}"
 
+        # Получаем данные поваров из iiko (зарплата, количество)
+        staff = await self.get_cook_staff_data(cook_role_codes)
+        iiko_salary = staff.get("avg_salary", 0)
+        iiko_cook_count = staff.get("count", 0)
+
+        # Приоритет: зарплата из iiko → фолбэк из конфига
+        effective_salary = iiko_salary if iiko_salary > 0 else cook_salary
+        effective_cooks = cooks_per_shift if cooks_per_shift > 0 else iiko_cook_count
+
         lines = [f"📊 === ПРОИЗВОДИТЕЛЬНОСТЬ КУХНИ ({date_from} — {date_to}) ==="]
+
+        # Информация об источнике данных поваров
+        if staff.get("cooks"):
+            lines.append(f"\n=== ПОВАРА ИЗ IIKO ({iiko_cook_count} чел.) ===")
+            for c in staff["cooks"]:
+                salary_str = f"{c['salary']:.0f} руб." if c["salary"] > 0 else "не указана"
+                lines.append(f"  {c['name']} | роль: {c['role']} | зарплата: {salary_str}")
+            if iiko_salary > 0:
+                lines.append(f"  Средняя зарплата за смену: {iiko_salary:.0f} руб. (источник: {staff['source']})")
+            else:
+                lines.append(f"  ⚠️ Зарплата в iiko не найдена")
+        elif not staff.get("error"):
+            lines.append(f"\n⚠️ Повара не найдены в iiko (доступные поля: {', '.join(staff.get('available_fields', [])[:15])})")
 
         # ─── Данные по поварам (если есть) ───
         cook_rows = data.get("cook_rows", [])
@@ -745,10 +910,13 @@ class IikoServerClient:
         # ─── ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ───
         # Формула: Выручка категории / Поваров в смену / Зарплата за смену
         dish_group_rows = data.get("dish_group_rows", [])
-        if cooks_per_shift > 0 and cook_salary > 0 and dish_group_rows:
+        if effective_cooks > 0 and effective_salary > 0 and dish_group_rows:
+            salary_source = "iiko" if iiko_salary > 0 else "конфиг (.env)"
+            cooks_source = "конфиг (.env)" if cooks_per_shift > 0 else f"iiko ({iiko_cook_count} чел.)"
+
             lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ===")
-            lines.append(f"  Поваров в смене: {cooks_per_shift}")
-            lines.append(f"  Зарплата повара за смену: {cook_salary:.0f} руб.")
+            lines.append(f"  Поваров в смене: {effective_cooks} (источник: {cooks_source})")
+            lines.append(f"  Зарплата повара за смену: {effective_salary:.0f} руб. (источник: {salary_source})")
             lines.append(f"  Рабочих дней в периоде: {num_days}")
             lines.append("")
 
@@ -765,12 +933,12 @@ class IikoServerClient:
                 kitchen_rev_total += revenue
 
             # Расчёт по каждой категории
-            salary_total_per_day = cooks_per_shift * cook_salary
+            salary_total_per_day = effective_cooks * effective_salary
             lines.append("  По категориям кухни (за день):")
             for g in sorted(kitchen_groups_prod, key=lambda x: x["revenue"], reverse=True):
                 daily_rev = g["revenue"] / num_days
-                per_cook = daily_rev / cooks_per_shift
-                coeff = per_cook / cook_salary
+                per_cook = daily_rev / effective_cooks
+                coeff = per_cook / effective_salary
                 lines.append(
                     f"    {g['group']}: "
                     f"{daily_rev:.0f} руб./день → "
@@ -780,8 +948,8 @@ class IikoServerClient:
 
             # Итого по всей кухне
             daily_total = kitchen_rev_total / num_days
-            per_cook_total = daily_total / cooks_per_shift
-            coeff_total = per_cook_total / cook_salary
+            per_cook_total = daily_total / effective_cooks
+            coeff_total = per_cook_total / effective_salary
             lines.append("")
             lines.append(f"  ИТОГО КУХНЯ за день: {daily_total:.0f} руб.")
             lines.append(f"  Выручка на 1 повара: {per_cook_total:.0f} руб.")
@@ -797,12 +965,18 @@ class IikoServerClient:
             else:
                 lines.append(f"  Оценка: НИЗКАЯ — повара не окупают свою зарплату ({coeff_total:.1f}x)")
 
-        elif cooks_per_shift <= 0 or cook_salary <= 0:
+        else:
             lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ===")
-            lines.append("  ⚠️ Не заданы параметры COOKS_PER_SHIFT и/или COOK_SALARY_PER_SHIFT")
-            lines.append("  Добавьте в .env:")
-            lines.append("    COOKS_PER_SHIFT=3")
-            lines.append("    COOK_SALARY_PER_SHIFT=3000")
+            missing = []
+            if effective_cooks <= 0:
+                missing.append("кол-во поваров (COOKS_PER_SHIFT или COOK_ROLE_CODES)")
+            if effective_salary <= 0:
+                missing.append("зарплата (из iiko или COOK_SALARY_PER_SHIFT)")
+            lines.append(f"  ⚠️ Не удалось рассчитать: нет данных — {', '.join(missing)}")
+            lines.append("  Настройте в .env:")
+            lines.append("    COOK_ROLE_CODES=ПОВАР,СУ-ШЕФ    # роли поваров в iiko")
+            lines.append("    COOKS_PER_SHIFT=3                # или вручную кол-во")
+            lines.append("    COOK_SALARY_PER_SHIFT=3000       # фолбэк если нет в iiko")
 
         return "\n".join(lines)
 

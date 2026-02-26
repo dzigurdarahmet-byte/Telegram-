@@ -33,7 +33,11 @@ else:
 # ─── Производительность поваров ───────────────────────────
 
 COOKS_PER_SHIFT = int(os.getenv("COOKS_PER_SHIFT", "0"))
+# Фолбэк — если в iiko нет данных по зарплате, используется это значение
 COOK_SALARY_PER_SHIFT = float(os.getenv("COOK_SALARY_PER_SHIFT", "0"))
+# Коды ролей поваров в iiko (через запятую). Пример: COOK,ПОВАР,ШЕФ
+_cook_roles = os.getenv("COOK_ROLE_CODES", "")
+COOK_ROLE_CODES = [x.strip().lower() for x in _cook_roles.split(",") if x.strip()] if _cook_roles else []
 
 
 def validate():
