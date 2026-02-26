@@ -257,15 +257,22 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать raw структуру заказа для отладки"""
     if not check_access(update.effective_user.id):
         return
-    args = context.args
-    msg = await update.message.reply_text("🔍 Загружаю отладку...")
+    msg = await update.message.reply_text("🔍 Загружаю пример заказа...")
     try:
-        if args and args[0] == "stop":
-            raw = await iiko_cloud.get_stop_list_debug()
-            await msg.edit_text(f"📋 Отладка стоп-листа:\n\n{raw[:3900]}")
-        else:
-            raw = await iiko_cloud.get_raw_order_sample()
-            await msg.edit_text(f"📋 Структура заказа:\n\n<pre>{raw[:3900]}</pre>", parse_mode="HTML")
+        raw = await iiko_cloud.get_raw_order_sample()
+        await msg.edit_text(f"📋 Структура заказа:\n\n<pre>{raw[:3900]}</pre>", parse_mode="HTML")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отладка стоп-листа"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔍 Отладка стоп-листа...")
+    try:
+        raw = await iiko_cloud.get_stop_list_debug()
+        await msg.edit_text(f"📋 Отладка стоп-листа:\n\n{raw[:3900]}")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -401,6 +408,7 @@ def main():
     app.add_handler(CommandHandler("abc", cmd_abc))
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("debug", cmd_debug))
+    app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
