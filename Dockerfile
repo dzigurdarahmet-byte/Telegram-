@@ -7,4 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Отключаем буферизацию — логи сразу видны в Railway
+ENV PYTHONUNBUFFERED=1
+
 CMD ["python", "bot.py"]
