@@ -660,69 +660,86 @@ class IikoServerClient:
                     err = str(e)[:80]
                     lines.append(f"❌ {ep}: {err}")
 
-        # ═══ 4. Полный список полей OLAP SALES ═══
-        lines.append("\n═══ ПОЛЯ OLAP SALES ═══")
+        # ═══ 4. Поиск зарплатного OLAP-отчёта ═══
+        lines.append("\n═══ ПОИСК ЗАРПЛАТНОГО OLAP ═══")
         yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         today = datetime.now().strftime("%Y-%m-%d")
 
         await self._ensure_token()
-        try:
-            response = await self.client.get(
-                f"{self.server_url}/resto/api/v2/reports/olap/columns",
-                params={"key": self.token, "reportType": "SALES"}
-            )
-            if response.status_code == 200:
-                data = json.loads(response.text)
-                # Структура: dict где ключи = имена полей
-                all_field_names = sorted(data.keys()) if isinstance(data, dict) else []
 
-                # Ключевые слова для поиска зарплатных/часовых полей
-                wage_kw = [
-                    "wage", "salary", "rate", "hour", "attend", "sched",
-                    "shift", "cook", "kitchen", "time", "duration",
-                    "ставк", "зарпл", "час", "смен", "отработ", "табел",
-                    "повар", "кухн", "длител", "врем",
-                ]
-                wage_fields = [f for f in all_field_names
-                               if any(kw in f.lower() for kw in wage_kw)]
-                # Также поля с Employee/Waiter/Worker
-                employee_fields = [f for f in all_field_names
-                                   if any(kw in f.lower() for kw in [
-                                       "employee", "waiter", "worker", "staff",
-                                       "сотруд", "офици", "персон",
-                                   ])]
-                # CookingPlace и подобные
-                cook_fields = [f for f in all_field_names
-                               if any(kw in f.lower() for kw in [
-                                   "cook", "повар", "кухн",
-                               ])]
+        # 4a. Пробуем получить колонки для разных типов отчётов
+        report_types_to_try = [
+            "SALES", "TRANSACTIONS", "EMPLOYEE_ATTENDANCES",
+            "STAFF", "PAYROLL", "SCHEDULE", "WAGES",
+            "CONSOLIDATED_WAGES", "SALARY",
+        ]
+        for rt in report_types_to_try:
+            try:
+                response = await self.client.get(
+                    f"{self.server_url}/resto/api/v2/reports/olap/columns",
+                    params={"key": self.token, "reportType": rt}
+                )
+                if response.status_code == 200:
+                    data = json.loads(response.text)
+                    field_names = sorted(data.keys()) if isinstance(data, dict) else []
+                    # Ищем зарплатные поля
+                    wage_kw = ["wage", "salary", "rate", "pay", "earning",
+                               "ставк", "зарпл", "оклад", "начисл", "оплат"]
+                    wage_fields = [f for f in field_names
+                                   if any(kw in f.lower() for kw in wage_kw)]
+                    if wage_fields:
+                        lines.append(f"✅ {rt}: {len(field_names)} полей, ЗАРПЛАТНЫЕ: {', '.join(wage_fields)}")
+                    else:
+                        lines.append(f"✅ {rt}: {len(field_names)} полей (зарплатных нет)")
+                else:
+                    lines.append(f"❌ {rt}: {response.status_code}")
+            except Exception as e:
+                lines.append(f"❌ {rt}: {str(e)[:60]}")
 
-                lines.append(f"Всего полей: {len(all_field_names)}")
+        # 4b. Пробуем OLAP-запрос с разными фильтрами для зарплатных отчётов
+        lines.append("\n═══ OLAP ЗАПРОСЫ (разные фильтры) ═══")
+        filter_variants = [
+            {"name": "без фильтра", "filters": {}},
+            {"name": "Session.Date", "filters": {
+                "Session.Date": {
+                    "filterType": "DateRange", "periodType": "CUSTOM",
+                    "from": yesterday, "to": today,
+                    "includeLow": "true", "includeHigh": "true"
+                }
+            }},
+            {"name": "Date", "filters": {
+                "Date": {
+                    "filterType": "DateRange", "periodType": "CUSTOM",
+                    "from": yesterday, "to": today,
+                    "includeLow": "true", "includeHigh": "true"
+                }
+            }},
+        ]
+        for rt in ["EMPLOYEE_ATTENDANCES", "CONSOLIDATED_WAGES", "SALARY", "PAYROLL"]:
+            for fv in filter_variants:
+                try:
+                    json_body = {
+                        "reportType": rt,
+                        "buildSummary": "false",
+                        "groupByRowFields": [],
+                        "groupByColFields": [],
+                        "aggregateFields": [],
+                        "filters": fv["filters"]
+                    }
+                    response = await self.client.post(
+                        f"{self.server_url}/resto/api/v2/reports/olap",
+                        params={"key": self.token},
+                        json=json_body
+                    )
+                    if response.status_code == 200:
+                        preview = response.text[:300].replace("\n", " ")
+                        lines.append(f"✅ {rt} ({fv['name']}): {preview}")
+                    else:
+                        lines.append(f"❌ {rt} ({fv['name']}): {response.status_code}")
+                except Exception as e:
+                    lines.append(f"❌ {rt} ({fv['name']}): {str(e)[:60]}")
 
-                if wage_fields:
-                    lines.append(f"\n⭐ ЗАРПЛАТА/ЧАСЫ ({len(wage_fields)}):")
-                    for f in wage_fields:
-                        lines.append(f"  {f}")
-
-                if cook_fields:
-                    lines.append(f"\n👨‍🍳 ПОВАР/КУХНЯ ({len(cook_fields)}):")
-                    for f in cook_fields:
-                        lines.append(f"  {f}")
-
-                if employee_fields:
-                    lines.append(f"\n👤 СОТРУДНИКИ ({len(employee_fields)}):")
-                    for f in employee_fields:
-                        lines.append(f"  {f}")
-
-                # Все поля для полноты
-                lines.append(f"\n📋 ВСЕ ПОЛЯ ({len(all_field_names)}):")
-                lines.append(", ".join(all_field_names))
-            else:
-                lines.append(f"❌ {response.status_code}: {response.text[:200]}")
-        except Exception as e:
-            lines.append(f"❌ {str(e)[:200]}")
-
-        # Пусто — заглушка чтобы не было ошибки
+        # Пусто — заглушка
         extra_endpoints = []
         for ep in extra_endpoints:
             try:
