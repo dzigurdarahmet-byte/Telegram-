@@ -164,6 +164,11 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
     msg = await update.message.reply_text(f"⏳ Загружаю данные ({label})...")
     try:
         data = await get_combined_data(period)
+        # Убираем исключённых сотрудников из данных
+        data = "\n".join(
+            line for line in data.split("\n")
+            if not any(name in line for name in EXCLUDED_STAFF)
+        )
         analysis = claude.analyze(question, data)
         await _safe_send(msg, analysis, update)
     except Exception as e:
@@ -321,6 +326,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         period = _detect_period(question)
         data = await get_combined_data(period)
+        data = "\n".join(
+            line for line in data.split("\n")
+            if not any(name in line for name in EXCLUDED_STAFF)
+        )
         analysis = claude.analyze(question, data)
         await _safe_send(msg, analysis, update)
     except Exception as e:
