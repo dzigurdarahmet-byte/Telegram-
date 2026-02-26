@@ -1,0 +1,15 @@
+version: "3.8"
+
+services:
+  iiko-bot:
+    build: .
+    container_name: iiko-claude-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Логи
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
