@@ -128,9 +128,11 @@ class IikoClient:
                 "type": p.get("type", "")
             }
             result[p["id"]] = product_info
-            # Также маппим по коду и артикулу если есть
-            if p.get("code"):
-                result[p["code"]] = product_info
+            # Также маппим по коду, артикулу и SKU
+            for key_field in ["code", "sku", "num"]:
+                val = p.get(key_field)
+                if val and val not in result:
+                    result[val] = product_info
         # Добавляем группы в карту (стоп-лист может содержать группы)
         for g in groups:
             if g["id"] not in result:
@@ -181,7 +183,8 @@ class IikoClient:
             for tg in org_data.get("items", []):
                 for item in tg.get("items", []):
                     product_id = item.get("productId", "")
-                    product_info = product_map.get(product_id, {})
+                    sku = item.get("sku", "")
+                    product_info = product_map.get(product_id) or product_map.get(sku) or {}
                     name = product_info.get("name")
                     balance = item.get("balance", 0)
                     if name:
