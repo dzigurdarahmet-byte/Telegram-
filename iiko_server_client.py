@@ -824,6 +824,46 @@ class IikoServerClient:
         except Exception as e:
             logger.warning(f"OLAP по дням: {e}")
 
+        # 7. Время готовки по кухонным станциям
+        try:
+            results["cooking_place_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["CookingPlace"],
+                aggregate_fields=["DishAmountInt", "DishSumInt",
+                                  "Cooking.CookingDuration.Avg",
+                                  "Cooking.KitchenTime.Avg",
+                                  "Cooking.GuestWaitTime.Avg"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP кухонные станции: {e}")
+
+        # 8. Время готовки по категориям блюд
+        try:
+            results["cooking_time_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["DishGroup"],
+                aggregate_fields=["DishAmountInt", "DishSumInt",
+                                  "Cooking.CookingDuration.Avg",
+                                  "Cooking.KitchenTime.Avg",
+                                  "Cooking.ServeTime.Avg",
+                                  "Cooking.CookingLateTime.Avg"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP время готовки: {e}")
+
+        # 9. Время готовки по часам (пики нагрузки → замедление)
+        try:
+            results["cooking_hour_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["HourOpen"],
+                aggregate_fields=["DishAmountInt",
+                                  "Cooking.CookingDuration.Avg",
+                                  "Cooking.GuestWaitTime.Avg",
+                                  "UniqOrderId.OrdersCount"]
+            )
+        except Exception as e:
+            logger.warning(f"OLAP время+часы: {e}")
+
         if not results:
             return {"error": "Не удалось получить данные кухни"}
 
@@ -981,6 +1021,68 @@ class IikoServerClient:
                 kitchen_dishes.append({"name": name, "group": group, "qty": qty, "revenue": revenue})
             for d in sorted(kitchen_dishes, key=lambda x: x["qty"], reverse=True)[:25]:
                 lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб. | {d['group']}")
+
+        # ─── Кухонные станции (CookingPlace) ───
+        cooking_place_rows = data.get("cooking_place_rows", [])
+        if cooking_place_rows:
+            lines.append("\n=== КУХОННЫЕ СТАНЦИИ ===")
+            for row in sorted(cooking_place_rows, key=lambda x: float(x.get("DishAmountInt") or 0), reverse=True):
+                place = row.get("CookingPlace") or row.get("Место приготовления") or "?"
+                qty = float(row.get("DishAmountInt") or 0)
+                revenue = float(row.get("DishSumInt") or 0)
+                cook_dur = row.get("Cooking.CookingDuration.Avg") or row.get("Ср. время готовки") or ""
+                kitchen_time = row.get("Cooking.KitchenTime.Avg") or row.get("Ср. время на кухне") or ""
+                wait_time = row.get("Cooking.GuestWaitTime.Avg") or row.get("Ср. ожидание гостя") or ""
+                time_parts = []
+                if cook_dur:
+                    time_parts.append(f"готовка: {cook_dur}")
+                if kitchen_time:
+                    time_parts.append(f"кухня: {kitchen_time}")
+                if wait_time:
+                    time_parts.append(f"ожидание: {wait_time}")
+                time_str = " | ".join(time_parts) if time_parts else ""
+                lines.append(f"  {place} | {qty:.0f} блюд | {revenue:.0f} руб. | {time_str}")
+
+        # ─── Время готовки по категориям ───
+        cooking_time_rows = data.get("cooking_time_rows", [])
+        if cooking_time_rows:
+            lines.append("\n=== ВРЕМЯ ГОТОВКИ ПО КАТЕГОРИЯМ ===")
+            for row in cooking_time_rows:
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                if self._is_bar_group(group):
+                    continue
+                qty = float(row.get("DishAmountInt") or 0)
+                cook_dur = row.get("Cooking.CookingDuration.Avg") or ""
+                kitchen_time = row.get("Cooking.KitchenTime.Avg") or ""
+                serve_time = row.get("Cooking.ServeTime.Avg") or ""
+                late_time = row.get("Cooking.CookingLateTime.Avg") or ""
+                parts = [f"{group}: {qty:.0f} блюд"]
+                if cook_dur:
+                    parts.append(f"готовка {cook_dur}")
+                if kitchen_time:
+                    parts.append(f"кухня {kitchen_time}")
+                if serve_time:
+                    parts.append(f"подача {serve_time}")
+                if late_time:
+                    parts.append(f"опоздания {late_time}")
+                lines.append(f"  {' | '.join(parts)}")
+
+        # ─── Нагрузка и скорость по часам ───
+        cooking_hour_rows = data.get("cooking_hour_rows", [])
+        if cooking_hour_rows:
+            lines.append("\n=== СКОРОСТЬ КУХНИ ПО ЧАСАМ ===")
+            for row in sorted(cooking_hour_rows, key=lambda x: x.get("HourOpen") or x.get("Час открытия") or ""):
+                hour = row.get("HourOpen") or row.get("Час открытия") or "?"
+                qty = float(row.get("DishAmountInt") or 0)
+                orders = float(row.get("UniqOrderId.OrdersCount") or 0)
+                cook_dur = row.get("Cooking.CookingDuration.Avg") or ""
+                wait_time = row.get("Cooking.GuestWaitTime.Avg") or ""
+                parts = [f"{hour}:00 | {qty:.0f} блюд | {orders:.0f} заказов"]
+                if cook_dur:
+                    parts.append(f"готовка {cook_dur}")
+                if wait_time:
+                    parts.append(f"ожидание {wait_time}")
+                lines.append(f"  {' | '.join(parts)}")
 
         # ─── Общие итоги ───
         day_rows = data.get("day_rows", [])
