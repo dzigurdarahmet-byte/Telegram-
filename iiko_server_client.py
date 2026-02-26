@@ -660,45 +660,85 @@ class IikoServerClient:
                     err = str(e)[:80]
                     lines.append(f"❌ {ep}: {err}")
 
-        # ═══ 4. OLAP с зарплатными полями ═══
-        lines.append("\n═══ OLAP ЗАРПЛАТНЫЕ ПОЛЯ ═══")
+        # ═══ 4. OLAP — разные типы отчётов ═══
+        lines.append("\n═══ OLAP ОТЧЁТЫ (ставки, часы) ═══")
         yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
         today = datetime.now().strftime("%Y-%m-%d")
 
-        # Попробовать разные OLAP-запросы
-        olap_attempts = [
-            {
-                "name": "SALES + Waiter wage fields",
-                "groups": ["OrderWaiter.Name"],
-                "aggs": ["DishSumInt", "UniqOrderId.OrdersCount",
-                         "OrderWaiter.Wage", "OrderWaiter.Rate",
-                         "WaiterWage", "PayRate"],
-            },
-            {
-                "name": "SALES + час + официант",
-                "groups": ["OrderWaiter.Name", "OpenDate.Typed"],
-                "aggs": ["DishSumInt", "HoursWorked", "ShiftHours",
-                         "WorkHours", "EmployeeHours"],
-            },
+        # Попробовать разные типы OLAP-отчётов
+        olap_report_types = [
+            "EMPLOYEE_ATTENDANCES",
+            "STAFF",
+            "PAYROLL",
+            "LIVEATTENDANCE",
+            "TRANSACTIONS",
         ]
-        for attempt in olap_attempts:
+        for rt in olap_report_types:
             try:
-                rows = await self._olap_request(
-                    yesterday, today,
-                    group_fields=attempt["groups"],
-                    aggregate_fields=attempt["aggs"],
+                await self._ensure_token()
+                json_body = {
+                    "reportType": rt,
+                    "buildSummary": "false",
+                    "groupByRowFields": [],
+                    "groupByColFields": [],
+                    "aggregateFields": [],
+                    "filters": {
+                        "OpenDate.Typed": {
+                            "filterType": "DateRange",
+                            "periodType": "CUSTOM",
+                            "from": yesterday,
+                            "to": today,
+                            "includeLow": "true",
+                            "includeHigh": "true"
+                        }
+                    }
+                }
+                response = await self.client.post(
+                    f"{self.server_url}/resto/api/v2/reports/olap",
+                    params={"key": self.token},
+                    json=json_body
                 )
-                if rows:
-                    lines.append(f"✅ {attempt['name']}: {len(rows)} строк")
-                    sample = rows[0] if rows else {}
-                    lines.append(f"  Поля: {', '.join(sample.keys())}")
-                    for row in rows[:3]:
-                        lines.append(f"  {row}")
+                if response.status_code == 200:
+                    preview = response.text[:500].replace("\n", " ")
+                    lines.append(f"✅ {rt}: {preview}")
                 else:
-                    lines.append(f"⚠️ {attempt['name']}: пусто")
+                    lines.append(f"❌ {rt}: {response.status_code}")
             except Exception as e:
-                err = str(e)[:100]
-                lines.append(f"❌ {attempt['name']}: {err}")
+                lines.append(f"❌ {rt}: {str(e)[:80]}")
+
+        # ═══ 5. Доступные колонки OLAP ═══
+        lines.append("\n═══ OLAP КОЛОНКИ (список полей) ═══")
+        olap_column_endpoints = [
+            "/resto/api/v2/reports/olap/columns",
+            "/resto/api/v2/reports/olap/reportTypes",
+            "/resto/api/v2/reports/olap/filters",
+        ]
+        for ep in olap_column_endpoints:
+            try:
+                text = await self._get(ep)
+                preview = text[:500].replace("\n", " ")
+                lines.append(f"✅ {ep}: {preview}")
+            except Exception as e:
+                lines.append(f"❌ {ep}: {str(e)[:80]}")
+
+        # ═══ 6. Ещё эндпоинты для расписания/ставок ═══
+        lines.append("\n═══ ДОПОЛНИТЕЛЬНЫЕ ЭНДПОИНТЫ ═══")
+        extra_endpoints = [
+            "/resto/api/v2/catering/olap/employeeAttendances",
+            "/resto/api/v2/employees/attendances",
+            "/resto/api/v2/schedule",
+            "/resto/api/employees/staffRates",
+            "/resto/api/v2/entities/employees/rates",
+            "/resto/api/corporation/schedules",
+        ]
+        for ep in extra_endpoints:
+            try:
+                text = await self._get(ep)
+                preview = text[:400].replace("\n", " ")
+                lines.append(f"✅ {ep}: {preview}")
+            except Exception as e:
+                err = str(e)[:80]
+                lines.append(f"❌ {ep}: {err}")
 
         return "\n".join(lines)
 
