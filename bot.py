@@ -461,14 +461,19 @@ async def cmd_debugemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_debugcooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отладка: поля поваров из iiko (для настройки зарплаты)"""
+    """Отладка: поиск данных о сменах поваров в iiko"""
     if not check_access(update.effective_user.id):
         return
-    msg = await update.message.reply_text("🔍 Ищу поваров в iiko...")
+    msg = await update.message.reply_text("🔍 Ищу данные о сменах поваров...")
     try:
         if iiko_server:
-            raw = await iiko_server.get_cook_salary_debug(COOK_ROLE_CODES)
-            await msg.edit_text(f"👨‍🍳 Повара в iiko:\n\n{raw[:3900]}")
+            raw = await iiko_server.get_cook_schedule_debug(COOK_ROLE_CODES)
+            # Разбиваем длинный ответ на части
+            if len(raw) > 3900:
+                await msg.edit_text(f"👨‍🍳 Смены поваров (1/2):\n\n{raw[:3900]}")
+                await update.message.reply_text(f"(2/2):\n\n{raw[3900:7800]}")
+            else:
+                await msg.edit_text(f"👨‍🍳 Смены поваров:\n\n{raw[:3900]}")
         else:
             await msg.edit_text("Локальный сервер не настроен")
     except Exception as e:

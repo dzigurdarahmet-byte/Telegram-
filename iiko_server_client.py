@@ -589,166 +589,110 @@ class IikoServerClient:
                 lines.append(f"{prefix}{child.tag}: {text}")
         return lines
 
-    async def get_cook_salary_debug(self, cook_role_codes: list = None) -> str:
-        """Отладка: глубокий поиск ставок и часов поваров в iiko"""
+    async def get_cook_schedule_debug(self, cook_role_codes: list = None) -> str:
+        """Отладка: поиск данных о сменах/посещаемости поваров в iiko"""
         lines = []
+        yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        await self._ensure_token()
 
-        # ═══ 1. Полный XML поваров (с вложенными элементами) ═══
+        # ═══ 1. Эндпоинты расписания/посещаемости ═══
+        lines.append("═══ ЭНДПОИНТЫ РАСПИСАНИЯ/СМЕН ═══")
+        schedule_endpoints = [
+            "/resto/api/v2/schedule/events",
+            "/resto/api/v2/schedule/resultingSchedule",
+            "/resto/api/v2/schedule/attendances",
+            "/resto/api/v2/employees/sessions",
+            "/resto/api/schedules",
+            "/resto/api/v2/catering/schedule",
+            f"/resto/api/v2/schedule/events?from={yesterday}&to={today}",
+            f"/resto/api/v2/schedule/resultingSchedule?from={yesterday}&to={today}",
+        ]
+        for ep in schedule_endpoints:
+            try:
+                text = await self._get(ep)
+                preview = text[:500].replace("\n", " ")
+                lines.append(f"✅ {ep}:\n  {preview}")
+            except Exception as e:
+                lines.append(f"❌ {ep}: {str(e)[:80]}")
+
+        # ═══ 2. OLAP: ищем поля связанные со сменами/сотрудниками ═══
+        lines.append("\n═══ OLAP: ПОЛЯ СОТРУДНИКОВ/СМЕН ═══")
+        try:
+            response = await self.client.get(
+                f"{self.server_url}/resto/api/v2/reports/olap/columns",
+                params={"key": self.token, "reportType": "SALES"}
+            )
+            if response.status_code == 200:
+                data = json.loads(response.text)
+                field_names = sorted(data.keys()) if isinstance(data, dict) else []
+                # Ищем поля связанные со сменами, сотрудниками, посещаемостью
+                kw = ["session", "user", "waiter", "employee", "cook",
+                      "shift", "attend", "open", "close", "cashier",
+                      "смен", "сотруд", "повар", "кассир", "офици"]
+                found = [f for f in field_names if any(k in f.lower() for k in kw)]
+                lines.append(f"Найдено полей: {len(found)}")
+                for f in found:
+                    lines.append(f"  • {f}")
+        except Exception as e:
+            lines.append(f"Ошибка: {e}")
+
+        # ═══ 3. OLAP: пробуем группировать по каждому найденному полю сотрудника + день ═══
+        lines.append("\n═══ OLAP: ПРОБУЕМ ПОЛЯ СОТРУДНИКОВ ПО ДНЯМ ═══")
+        user_fields = [
+            "OpenUser.Name", "SessionUser.Name", "CloseUser.Name",
+            "CashRegisterUser.Name", "OrderWaiter.Name",
+            "Cooking.Name", "OrderCookingUser.Name",
+        ]
+        for field in user_fields:
+            try:
+                rows = await self._olap_request(
+                    yesterday, today,
+                    group_fields=[field, "OpenDate.Typed"],
+                    aggregate_fields=["DishAmountInt"]
+                )
+                if rows:
+                    # Считаем уникальных сотрудников по дням
+                    by_day = defaultdict(set)
+                    for row in rows:
+                        name = row.get(field) or "?"
+                        day = row.get("OpenDate.Typed") or "?"
+                        by_day[day].add(name)
+                    day_info = ", ".join([f"{d}: {len(names)} чел" for d, names in sorted(by_day.items())])
+                    all_names = set()
+                    for names in by_day.values():
+                        all_names.update(names)
+                    lines.append(f"✅ {field}: {len(all_names)} уник. | {day_info}")
+                    # Показываем имена
+                    for name in sorted(all_names)[:10]:
+                        lines.append(f"    - {name}")
+                else:
+                    lines.append(f"⚪ {field}: пусто")
+            except Exception as e:
+                lines.append(f"❌ {field}: {str(e)[:60]}")
+
+        # ═══ 4. Список поваров из /employees для справки ═══
+        lines.append("\n═══ ПОВАРА В IIKO (справка) ═══")
         try:
             text = await self._get("/resto/api/employees")
             root = ET.fromstring(text)
-
-            cook_count = 0
-            cook_ids = []
+            cook_names = []
             for emp in root.findall(".//employee"):
-                deleted = emp.findtext("deleted") or "false"
-                if deleted == "true":
+                if (emp.findtext("deleted") or "false") == "true":
                     continue
-                role_code = (emp.findtext("mainRoleCode") or "").strip()
-                is_cook = role_code.lower() in [c.lower() for c in (cook_role_codes or [])]
-                if not cook_role_codes:
-                    is_cook = any(kw in role_code.lower() for kw in ["cook", "повар", "шеф", "pov"])
-                if not is_cook:
-                    continue
-                cook_count += 1
-                cook_ids.append(emp.findtext("id") or "")
-                if cook_count <= 2:
-                    name = emp.findtext("name") or "?"
-                    lines.append(f"═══ Повар #{cook_count}: {name} ({role_code}) ═══")
-                    lines.extend(self._xml_to_text(emp, indent=1))
-                    lines.append("")
-
-            lines.append(f"Всего поваров (роль POV): {cook_count}")
-        except Exception as e:
-            lines.append(f"Ошибка employees: {e}")
-            cook_ids = []
-
-        # ═══ 2. Эндпоинты зарплат/расписания ═══
-        wage_endpoints = [
-            "/resto/api/v2/schedule/events",
-            "/resto/api/v2/employees/wages",
-            "/resto/api/employees/payroll",
-            "/resto/api/corporation/employees",
-            "/resto/api/v2/schedule/resultingSchedule",
-        ]
-        lines.append("\n═══ ПОИСК ЭНДПОИНТОВ ЗАРПЛАТ ═══")
-        for ep in wage_endpoints:
-            try:
-                text = await self._get(ep)
-                preview = text[:300].replace("\n", " ")
-                lines.append(f"✅ {ep}: {preview}")
-            except Exception as e:
-                err = str(e)[:80]
-                lines.append(f"❌ {ep}: {err}")
-
-        # ═══ 3. Эндпоинты для конкретного повара ═══
-        if cook_ids:
-            emp_id = cook_ids[0]
-            per_employee_eps = [
-                f"/resto/api/employees/{emp_id}",
-                f"/resto/api/v2/employees/{emp_id}",
-                f"/resto/api/v2/employees/{emp_id}/wages",
-                f"/resto/api/v2/employees/{emp_id}/schedule",
-            ]
-            lines.append(f"\n═══ ДАННЫЕ ПОВАРА {emp_id[:8]}... ═══")
-            for ep in per_employee_eps:
-                try:
-                    text = await self._get(ep)
-                    preview = text[:400].replace("\n", " ")
-                    lines.append(f"✅ {ep}:\n  {preview}")
-                except Exception as e:
-                    err = str(e)[:80]
-                    lines.append(f"❌ {ep}: {err}")
-
-        # ═══ 4. Поиск зарплатного OLAP-отчёта ═══
-        lines.append("\n═══ ПОИСК ЗАРПЛАТНОГО OLAP ═══")
-        yesterday = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        today = datetime.now().strftime("%Y-%m-%d")
-
-        await self._ensure_token()
-
-        # 4a. Пробуем получить колонки для разных типов отчётов
-        report_types_to_try = [
-            "SALES", "TRANSACTIONS", "EMPLOYEE_ATTENDANCES",
-            "STAFF", "PAYROLL", "SCHEDULE", "WAGES",
-            "CONSOLIDATED_WAGES", "SALARY",
-        ]
-        for rt in report_types_to_try:
-            try:
-                response = await self.client.get(
-                    f"{self.server_url}/resto/api/v2/reports/olap/columns",
-                    params={"key": self.token, "reportType": rt}
-                )
-                if response.status_code == 200:
-                    data = json.loads(response.text)
-                    field_names = sorted(data.keys()) if isinstance(data, dict) else []
-                    # Ищем зарплатные поля
-                    wage_kw = ["wage", "salary", "rate", "pay", "earning",
-                               "ставк", "зарпл", "оклад", "начисл", "оплат"]
-                    wage_fields = [f for f in field_names
-                                   if any(kw in f.lower() for kw in wage_kw)]
-                    if wage_fields:
-                        lines.append(f"✅ {rt}: {len(field_names)} полей, ЗАРПЛАТНЫЕ: {', '.join(wage_fields)}")
-                    else:
-                        lines.append(f"✅ {rt}: {len(field_names)} полей (зарплатных нет)")
+                role = (emp.findtext("mainRoleCode") or "").strip()
+                if cook_role_codes:
+                    if role.lower() not in [c.lower() for c in cook_role_codes]:
+                        continue
                 else:
-                    lines.append(f"❌ {rt}: {response.status_code}")
-            except Exception as e:
-                lines.append(f"❌ {rt}: {str(e)[:60]}")
-
-        # 4b. Пробуем OLAP-запрос с разными фильтрами для зарплатных отчётов
-        lines.append("\n═══ OLAP ЗАПРОСЫ (разные фильтры) ═══")
-        filter_variants = [
-            {"name": "без фильтра", "filters": {}},
-            {"name": "Session.Date", "filters": {
-                "Session.Date": {
-                    "filterType": "DateRange", "periodType": "CUSTOM",
-                    "from": yesterday, "to": today,
-                    "includeLow": "true", "includeHigh": "true"
-                }
-            }},
-            {"name": "Date", "filters": {
-                "Date": {
-                    "filterType": "DateRange", "periodType": "CUSTOM",
-                    "from": yesterday, "to": today,
-                    "includeLow": "true", "includeHigh": "true"
-                }
-            }},
-        ]
-        for rt in ["EMPLOYEE_ATTENDANCES", "CONSOLIDATED_WAGES", "SALARY", "PAYROLL"]:
-            for fv in filter_variants:
-                try:
-                    json_body = {
-                        "reportType": rt,
-                        "buildSummary": "false",
-                        "groupByRowFields": [],
-                        "groupByColFields": [],
-                        "aggregateFields": [],
-                        "filters": fv["filters"]
-                    }
-                    response = await self.client.post(
-                        f"{self.server_url}/resto/api/v2/reports/olap",
-                        params={"key": self.token},
-                        json=json_body
-                    )
-                    if response.status_code == 200:
-                        preview = response.text[:300].replace("\n", " ")
-                        lines.append(f"✅ {rt} ({fv['name']}): {preview}")
-                    else:
-                        lines.append(f"❌ {rt} ({fv['name']}): {response.status_code}")
-                except Exception as e:
-                    lines.append(f"❌ {rt} ({fv['name']}): {str(e)[:60]}")
-
-        # Пусто — заглушка
-        extra_endpoints = []
-        for ep in extra_endpoints:
-            try:
-                text = await self._get(ep)
-                preview = text[:400].replace("\n", " ")
-                lines.append(f"✅ {ep}: {preview}")
-            except Exception as e:
-                err = str(e)[:80]
-                lines.append(f"❌ {ep}: {err}")
+                    if not any(kw in role.lower() for kw in ["cook", "повар", "шеф", "pov"]):
+                        continue
+                cook_names.append(emp.findtext("name") or "?")
+            lines.append(f"Всего поваров: {len(cook_names)}")
+            for n in sorted(cook_names):
+                lines.append(f"  • {n}")
+        except Exception as e:
+            lines.append(f"Ошибка: {e}")
 
         return "\n".join(lines)
 
