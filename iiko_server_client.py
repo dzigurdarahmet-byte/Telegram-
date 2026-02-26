@@ -757,7 +757,16 @@ class IikoServerClient:
         results = {}
 
         # 1. Попробовать получить данные по повару (если iiko отслеживает)
-        for field in ["Cooking.Name"]:
+        # Перебираем возможные OLAP-поля: повар/кассир/официант/сотрудник
+        tried_fields = []
+        for field in [
+            "Cooking.Name",
+            "OrderCookingUser.Name",
+            "CookingUser.Name",
+            "OpenUser.Name",
+            "SessionUser.Name",
+            "OrderWaiter.Name",
+        ]:
             try:
                 cook_rows = await self._olap_request(
                     date_from, date_to,
@@ -787,8 +796,13 @@ class IikoServerClient:
                     except Exception:
                         pass
                     break
+                else:
+                    tried_fields.append(f"{field}: пусто")
             except Exception as e:
+                tried_fields.append(f"{field}: ошибка")
                 logger.info(f"OLAP поле {field} недоступно: {e}")
+        if tried_fields and "cook_rows" not in results:
+            results["tried_cook_fields"] = tried_fields
 
         # 2. Блюда по категориям (для разделения кухня/бар)
         try:
@@ -939,6 +953,12 @@ class IikoServerClient:
         # ─── Данные по поварам (если есть) ───
         cook_rows = data.get("cook_rows", [])
         cook_field = data.get("cook_field", "")
+        if not cook_rows:
+            tried = data.get("tried_cook_fields", [])
+            if tried:
+                lines.append(f"\n⚠️ OLAP: данные по поварам не найдены. Проверенные поля:")
+                for t in tried:
+                    lines.append(f"  • {t}")
         if cook_rows:
             lines.append("\n=== ВЫРАБОТКА ПО ПОВАРАМ ===")
             for row in sorted(cook_rows, key=lambda x: float(x.get("DishAmountInt") or x.get("Количество блюд") or 0), reverse=True):
