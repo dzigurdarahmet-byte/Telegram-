@@ -299,6 +299,21 @@ async def cmd_groups(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def cmd_debugemp(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отладка: структура сотрудников"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔍 Загружаю сотрудников...")
+    try:
+        if iiko_server:
+            raw = await iiko_server.get_employees_debug()
+            await msg.edit_text(f"👥 Сотрудники:\n\n{raw[:3900]}")
+        else:
+            await msg.edit_text("Локальный сервер не настроен")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отладка стоп-листа"""
     if not check_access(update.effective_user.id):
@@ -443,6 +458,7 @@ def main():
     app.add_handler(CommandHandler("diag", cmd_diag))
     app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CommandHandler("groups", cmd_groups))
+    app.add_handler(CommandHandler("debugemp", cmd_debugemp))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

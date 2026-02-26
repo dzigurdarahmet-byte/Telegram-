@@ -435,6 +435,21 @@ class IikoServerClient:
             logger.warning(f"Не удалось получить сотрудников: {e}")
             return []
 
+    async def get_employees_debug(self) -> str:
+        """Отладка: показать полную структуру сотрудников"""
+        try:
+            text = await self._get("/resto/api/employees")
+            # Показать первых 2 записи
+            if text.strip().startswith("["):
+                data = json.loads(text)
+                sample = data[:2] if len(data) > 2 else data
+                return f"JSON ({len(data)} сотрудников):\n" + json.dumps(sample, ensure_ascii=False, indent=2, default=str)[:3800]
+            elif text.strip().startswith("<"):
+                return f"XML (первые 3000 символов):\n{text[:3000]}"
+            return text[:3000]
+        except Exception as e:
+            return f"Ошибка: {e}"
+
     async def test_connection(self) -> str:
         """Тест подключения"""
         try:
