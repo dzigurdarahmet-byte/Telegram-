@@ -21,7 +21,7 @@ from config import (
     ALLOWED_USERS, ADMIN_CHAT_ID,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
-    GOOGLE_SHEET_ID, COOK_SHIFT_HOURS,
+    GOOGLE_SHEET_ID,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 
@@ -329,18 +329,16 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Данные зарплат из Google Sheets
         sheet_salary = 0
-        sheet_cooks = 0
         if GOOGLE_SHEET_ID:
             try:
                 salary_data = await fetch_salary_data(GOOGLE_SHEET_ID, section="Повар")
-                parts.append(format_salary_summary(salary_data, COOK_SHIFT_HOURS))
-                if salary_data.get("avg_hourly_rate", 0) > 0:
-                    sheet_salary = salary_data["avg_hourly_rate"] * COOK_SHIFT_HOURS
-                    sheet_cooks = salary_data["count"]
+                parts.append(format_salary_summary(salary_data))
+                if salary_data.get("avg_daily_salary", 0) > 0:
+                    sheet_salary = salary_data["avg_daily_salary"]
             except Exception as e:
                 parts.append(f"⚠️ Google Sheets: {e}")
 
-        # Зарплата: Google Sheets → конфиг
+        # Зарплата: Google Sheets (фактическая средняя за день) → конфиг
         effective_salary = sheet_salary if sheet_salary > 0 else COOK_SALARY_PER_SHIFT
 
         # Данные кухни с локального сервера

@@ -1133,7 +1133,7 @@ class IikoServerClient:
 
             lines.append("\n=== ПРОИЗВОДИТЕЛЬНОСТЬ ТРУДА ПОВАРОВ ===")
             lines.append(f"  Поваров в смене: {effective_cooks} (источник: {cooks_source})")
-            lines.append(f"  Зарплата повара за смену: {effective_salary:.0f} руб. (источник: {salary_source})")
+            lines.append(f"  Средняя зарплата повара за день: {effective_salary:.0f} руб. (источник: {salary_source})")
             lines.append(f"  Рабочих дней в периоде: {num_days}")
             lines.append("")
 
@@ -1172,7 +1172,7 @@ class IikoServerClient:
             lines.append(f"  Выручка на 1 повара: {per_cook_total:.0f} руб.")
             lines.append(f"  ФОТ поваров за день: {salary_total_per_day:.0f} руб.")
             lines.append(f"  Коэффициент производительности: {coeff_total:.2f}")
-            lines.append(f"  (выручка на повара / зарплата за смену)")
+            lines.append(f"  (выручка на повара / зарплата за день)")
             if coeff_total >= 3:
                 lines.append(f"  Оценка: ОТЛИЧНО — повара окупаются в {coeff_total:.1f}x")
             elif coeff_total >= 2:
@@ -1188,7 +1188,7 @@ class IikoServerClient:
             if effective_cooks <= 0:
                 missing.append("кол-во поваров (COOKS_PER_SHIFT или COOK_ROLE_CODES)")
             if effective_salary <= 0:
-                missing.append("зарплата (из iiko или COOK_SALARY_PER_SHIFT)")
+                missing.append("зарплата (Google Sheets или COOK_SALARY_PER_SHIFT)")
             lines.append(f"  ⚠️ Не удалось рассчитать: нет данных — {', '.join(missing)}")
             lines.append("  Настройте в .env:")
             lines.append("    COOK_ROLE_CODES=ПОВАР,СУ-ШЕФ    # роли поваров в iiko")

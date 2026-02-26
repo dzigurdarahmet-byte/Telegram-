@@ -6,7 +6,9 @@
 import httpx
 import csv
 import io
+import re
 import logging
+from datetime import datetime
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,20 @@ def _parse_hours(value: str) -> float:
     return _parse_number(value)
 
 
+def _parse_period_days(period_str: str) -> int:
+    """Извлечь количество дней из строки периода: 'с 01.01.2026 по 31.01.2026' → 31"""
+    dates = re.findall(r'(\d{2}\.\d{2}\.\d{4})', period_str)
+    if len(dates) >= 2:
+        try:
+            d1 = datetime.strptime(dates[0], "%d.%m.%Y")
+            d2 = datetime.strptime(dates[1], "%d.%m.%Y")
+            days = (d2 - d1).days + 1
+            return max(days, 1)
+        except ValueError:
+            pass
+    return 0
+
+
 async def fetch_salary_data(sheet_id: str, section: str = "Повар") -> dict:
     """
     Загрузить данные по зарплатам из Google Sheets.
@@ -61,7 +77,8 @@ async def fetch_salary_data(sheet_id: str, section: str = "Повар") -> dict:
         }
     """
     result = {
-        "period": "", "employees": [], "avg_hourly_rate": 0,
+        "period": "", "period_days": 0, "employees": [],
+        "avg_hourly_rate": 0, "avg_daily_salary": 0,
         "total_hours": 0, "count": 0, "error": None,
     }
 
@@ -84,6 +101,7 @@ async def fetch_salary_data(sheet_id: str, section: str = "Повар") -> dict:
             line = ",".join(row)
             if "период" in line.lower() or "За период" in line:
                 result["period"] = line.replace(",", " ").strip()
+                result["period_days"] = _parse_period_days(result["period"])
                 break
 
         # Ищем заголовок таблицы — строку с "Сотрудник"
@@ -175,6 +193,13 @@ async def fetch_salary_data(sheet_id: str, section: str = "Повар") -> dict:
             result["avg_hourly_rate"] = sum(rates) / len(rates)
         result["total_hours"] = sum(e.get("hours_worked", 0) for e in employees)
 
+        # Средняя дневная зарплата повара (итого / дней периода / кол-во поваров)
+        totals = [e["total"] for e in employees if e.get("total", 0) > 0]
+        period_days = result["period_days"]
+        if totals and period_days > 0:
+            avg_total = sum(totals) / len(totals)
+            result["avg_daily_salary"] = avg_total / period_days
+
     except httpx.HTTPStatusError as e:
         result["error"] = f"Ошибка загрузки таблицы: {e.response.status_code}"
     except Exception as e:
@@ -183,7 +208,7 @@ async def fetch_salary_data(sheet_id: str, section: str = "Повар") -> dict:
     return result
 
 
-def format_salary_summary(data: dict, shift_hours: float = 12) -> str:
+def format_salary_summary(data: dict) -> str:
     """Форматировать данные зарплат для отчёта производительности"""
     if data.get("error"):
         return f"⚠️ Google Sheets: {data['error']}"
@@ -192,25 +217,29 @@ def format_salary_summary(data: dict, shift_hours: float = 12) -> str:
     if not employees:
         return "⚠️ Повара не найдены в Google Sheets"
 
-    lines = [f"💰 === ЗАРПЛАТЫ ПОВАРОВ (Google Sheets) ==="]
+    period_days = data.get("period_days", 0)
+
+    lines = ["💰 === ЗАРПЛАТЫ ПОВАРОВ (Google Sheets) ==="]
     if data.get("period"):
         lines.append(f"  {data['period']}")
+        if period_days > 0:
+            lines.append(f"  Дней в периоде: {period_days}")
     lines.append(f"  Поваров: {data['count']}")
     lines.append(f"  Средняя ставка: {data['avg_hourly_rate']:.0f} руб/час")
-    lines.append(f"  Длительность смены: {shift_hours:.0f} ч")
-    avg_shift_salary = data["avg_hourly_rate"] * shift_hours
-    lines.append(f"  Средняя зарплата за смену: {avg_shift_salary:.0f} руб.")
+    if data.get("avg_daily_salary", 0) > 0:
+        lines.append(f"  Средняя зарплата за день: {data['avg_daily_salary']:.0f} руб.")
     lines.append("")
 
     for emp in sorted(employees, key=lambda x: x.get("hours_worked", 0), reverse=True):
         rate = emp.get("hourly_rate", 0)
         hours = emp.get("hours_worked", 0)
         total = emp.get("total", 0)
-        shift_salary = rate * shift_hours if rate > 0 else 0
+        daily = total / period_days if period_days > 0 and total > 0 else 0
         lines.append(
             f"  {emp['name']}: "
-            f"{rate:.0f} руб/ч × {shift_hours:.0f}ч = {shift_salary:.0f} руб/смена | "
+            f"{rate:.0f} руб/ч | "
             f"отработано {hours:.1f}ч | итого {total:.0f} руб."
+            + (f" | {daily:.0f} руб/день" if daily > 0 else "")
         )
 
     return "\n".join(lines)

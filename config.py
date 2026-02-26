@@ -40,7 +40,6 @@ COOK_ROLE_CODES = [x.strip().lower() for x in _cook_roles.split(",") if x.strip(
 # ─── Google Sheets (зарплаты) ─────────────────────────────
 
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
-COOK_SHIFT_HOURS = float(os.getenv("COOK_SHIFT_HOURS", "12"))
 
 
 def validate():
