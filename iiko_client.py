@@ -222,16 +222,30 @@ class IikoClient:
         except Exception as e:
             logger.warning(f"deliveries (all) не сработал: {e}")
 
-        logger.info(f"Пробовали: {methods_tried}. Успешно: {methods_success}. Всего заказов: {len(all_orders)}")
+        # Фильтруем удалённые заказы
+        filtered = []
+        deleted_count = 0
+        for o in all_orders:
+            order_obj = o.get("order") or o
+            if order_obj.get("isDeleted"):
+                deleted_count += 1
+                continue
+            filtered.append(o)
+
+        logger.info(
+            f"Пробовали: {methods_tried}. Успешно: {methods_success}. "
+            f"Всего: {len(all_orders)}, удалённых: {deleted_count}, итого: {len(filtered)}"
+        )
 
         # Сохраняем диагностику
         self._last_diag = {
             "methods_tried": methods_tried,
             "methods_success": methods_success,
-            "total_orders": len(all_orders)
+            "total_orders": len(filtered),
+            "deleted_orders": deleted_count
         }
 
-        return all_orders
+        return filtered
 
     # ─── Анализ заказов ────────────────────────────────────
 
