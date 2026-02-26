@@ -186,10 +186,13 @@ class IikoClient:
                     product_info = product_map.get(product_id) or product_map.get(sku) or {}
                     name = product_info.get("name")
                     balance = item.get("balance", 0)
-                    if name:
-                        items.append(f"  🔴 {name} (остаток: {balance})")
-                    elif sku:
-                        items.append(f"  🔴 арт. {sku} (остаток: {balance})")
+                    if balance <= 0:
+                        status = "нет в наличии"
+                    else:
+                        status = f"остаток: {balance:.0f}"
+                    label = name or (f"арт. {sku}" if sku else None)
+                    if label:
+                        items.append(f"  🔴 {label} — {status}")
         if not items:
             return "✅ Стоп-лист пуст — все позиции в наличии!"
         return f"🚫 Стоп-лист ({len(items)} позиций):\n" + "\n".join(items)
