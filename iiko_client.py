@@ -352,7 +352,7 @@ class IikoClient:
         return orders
 
     async def _collect_all_orders(self, date_from: str, date_to: str) -> list:
-        """Собрать все заказы. Длинные диапазоны разбиваются на недельные чанки."""
+        """Собрать все заказы. Диапазоны > 1 дня разбиваются на однодневные запросы."""
         org_id = await self.get_organization_id()
         all_orders = []
         methods_tried = []
@@ -363,24 +363,25 @@ class IikoClient:
         dt_to = datetime.strptime(date_to, "%Y-%m-%d")
         span_days = (dt_to - dt_from).days
 
-        # Если диапазон > 7 дней — разбиваем на недельные чанки
-        if span_days > 7:
-            methods_tried.append(f"deliveries/chunks ({date_from}—{date_to})")
-            chunk_start = dt_from
-            while chunk_start <= dt_to:
-                chunk_end = min(chunk_start + timedelta(days=6), dt_to)
-                c_from = chunk_start.strftime("%Y-%m-%d")
-                c_to = chunk_end.strftime("%Y-%m-%d")
+        # Всегда разбиваем на однодневные запросы (iiko API стабильно работает только с 1 днём)
+        if span_days > 0:
+            methods_tried.append(f"deliveries/daily_chunks ({date_from}—{date_to}, {span_days + 1} дней)")
+            current_day = dt_from
+            while current_day <= dt_to:
+                day_str = current_day.strftime("%Y-%m-%d")
                 try:
-                    chunk_orders = await self._fetch_orders_chunk(org_id, c_from, c_to)
+                    chunk_orders = await self._fetch_orders_chunk(org_id, day_str, day_str)
                     all_orders.extend(chunk_orders)
                     if chunk_orders:
-                        methods_success.append(f"{c_from}→{c_to}: {len(chunk_orders)}")
-                    logger.info(f"Чанк {c_from}—{c_to}: {len(chunk_orders)} заказов")
+                        methods_success.append(f"{day_str}: {len(chunk_orders)}")
+                    logger.info(f"День {day_str}: {len(chunk_orders)} заказов")
                 except Exception as e:
-                    logger.error(f"Чанк {c_from}—{c_to} ошибка: {e}")
-                    errors.append(f"{c_from}→{c_to}: {e}")
-                chunk_start = chunk_end + timedelta(days=1)
+                    logger.error(f"День {day_str} ошибка: {e}")
+                    errors.append(f"{day_str}: {e}")
+                current_day += timedelta(days=1)
+                # Пауза между запросами для избежания rate-limit
+                if current_day <= dt_to:
+                    await asyncio.sleep(0.5)
         else:
             methods_tried.append("deliveries/by_delivery_date_and_status")
             try:
