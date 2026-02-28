@@ -363,8 +363,64 @@ class IikoClient:
                 else:
                     raise
 
+    async def _fetch_orders_by_revision(self, org_id: str, date_from: str, date_to: str) -> list:
+        """Получить заказы через by_revision — доступ к полной истории"""
+        all_matching = []
+        revision = 0
+        total_scanned = 0
+        empty_consecutive = 0
+
+        for page in range(200):  # safety: max 200 pages
+            try:
+                data = await self._post("/api/1/deliveries/by_revision", {
+                    "organizationIds": [org_id],
+                    "startRevision": revision,
+                })
+            except Exception as e:
+                logger.error(f"by_revision page {page}, rev={revision}: {e}")
+                break
+
+            page_orders = []
+            for org_data in data.get("ordersByOrganizations", []):
+                page_orders.extend(org_data.get("orders", []))
+
+            total_scanned += len(page_orders)
+
+            if not page_orders:
+                empty_consecutive += 1
+                if empty_consecutive >= 2:
+                    break
+            else:
+                empty_consecutive = 0
+
+            # Фильтруем по диапазону дат
+            for order in page_orders:
+                order_obj = order.get("order") or order
+                order_date = ""
+                for field in ["deliveryDate", "whenCreated", "completeBefore", "createdAt"]:
+                    val = order_obj.get(field, "")
+                    if val and len(str(val)) >= 10:
+                        order_date = str(val)[:10]
+                        break
+                if order_date and date_from <= order_date <= date_to:
+                    all_matching.append(order)
+
+            new_revision = data.get("maxRevision", revision)
+            if new_revision <= revision:
+                break
+            revision = new_revision
+
+            logger.info(
+                f"by_revision page {page}: scanned={len(page_orders)}, "
+                f"matched_total={len(all_matching)}, rev={revision}"
+            )
+            await asyncio.sleep(0.5)
+
+        logger.info(f"by_revision итого: scanned={total_scanned}, matched={len(all_matching)}")
+        return all_matching
+
     async def _collect_all_orders(self, date_from: str, date_to: str) -> list:
-        """Собрать все заказы. Диапазоны > 1 дня разбиваются на однодневные запросы."""
+        """Собрать все заказы. Для многодневных — сначала by_revision, потом daily chunks."""
         org_id = await self.get_organization_id()
         all_orders = []
         methods_tried = []
@@ -375,39 +431,61 @@ class IikoClient:
         dt_to = datetime.strptime(date_to, "%Y-%m-%d")
         span_days = (dt_to - dt_from).days
 
-        if span_days > 0:
-            methods_tried.append(f"deliveries/daily ({date_from}—{date_to}, {span_days + 1} дней)")
-            # Принудительно обновляем токен перед большой серией запросов
-            self.token = None
-            await self._ensure_token()
+        if span_days > 3:
+            # Для длинных диапазонов: сначала пробуем by_revision (полная история)
+            methods_tried.append(f"by_revision ({date_from}—{date_to})")
+            try:
+                revision_orders = await self._fetch_orders_by_revision(org_id, date_from, date_to)
+                if revision_orders:
+                    all_orders.extend(revision_orders)
+                    methods_success.append(f"by_revision: {len(revision_orders)} заказов")
+            except Exception as e:
+                logger.error(f"by_revision не сработал: {e}")
+                errors.append(f"by_revision: {e}")
 
+            # Если by_revision не дал результатов — fallback на daily chunks
+            if not all_orders:
+                methods_tried.append(f"daily_chunks fallback ({span_days + 1} дней)")
+                self.token = None
+                await self._ensure_token()
+                current_day = dt_from
+                request_count = 0
+                while current_day <= dt_to:
+                    day_str = current_day.strftime("%Y-%m-%d")
+                    if request_count > 0 and request_count % 10 == 0:
+                        self.token = None
+                        await self._ensure_token()
+                        await asyncio.sleep(1)
+                    try:
+                        chunk_orders = await self._fetch_orders_chunk(org_id, day_str, day_str)
+                        all_orders.extend(chunk_orders)
+                        if chunk_orders:
+                            methods_success.append(f"{day_str}: {len(chunk_orders)}")
+                    except Exception as e:
+                        errors.append(f"{day_str}: {e}")
+                    current_day += timedelta(days=1)
+                    request_count += 1
+                    if current_day <= dt_to:
+                        await asyncio.sleep(2)
+
+        elif span_days > 0:
+            # Для коротких диапазонов (2-3 дня): daily chunks
+            methods_tried.append(f"daily_chunks ({date_from}—{date_to})")
             current_day = dt_from
-            request_count = 0
             while current_day <= dt_to:
                 day_str = current_day.strftime("%Y-%m-%d")
-
-                # Обновляем токен каждые 10 запросов
-                if request_count > 0 and request_count % 10 == 0:
-                    self.token = None
-                    await self._ensure_token()
-                    await asyncio.sleep(1)
-
                 try:
                     chunk_orders = await self._fetch_orders_chunk(org_id, day_str, day_str)
                     all_orders.extend(chunk_orders)
                     if chunk_orders:
                         methods_success.append(f"{day_str}: {len(chunk_orders)}")
-                    logger.info(f"День {day_str}: {len(chunk_orders)} заказов")
                 except Exception as e:
-                    logger.error(f"День {day_str} ошибка (после retry): {e}")
                     errors.append(f"{day_str}: {e}")
-
                 current_day += timedelta(days=1)
-                request_count += 1
-                # Пауза 2с между запросами
                 if current_day <= dt_to:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
         else:
+            # Один день
             methods_tried.append("deliveries/by_delivery_date_and_status")
             try:
                 chunk_orders = await self._fetch_orders_chunk(org_id, date_from, date_to)
