@@ -601,6 +601,45 @@ class IikoClient:
 
     # ─── Публичные методы для бота ─────────────────────────
 
+    async def get_period_totals(self, period: str) -> dict:
+        """Агрегированные итоги за период: {revenue, orders, avg_check}"""
+        today = datetime.now()
+        if period == "today":
+            date_from = date_to = today.strftime("%Y-%m-%d")
+        elif period == "yesterday":
+            d = today - timedelta(days=1)
+            date_from = date_to = d.strftime("%Y-%m-%d")
+        elif period == "week":
+            date_from = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+            date_to = today.strftime("%Y-%m-%d")
+        elif period == "month":
+            date_from = today.replace(day=1).strftime("%Y-%m-%d")
+            date_to = today.strftime("%Y-%m-%d")
+        else:
+            date_from = date_to = period
+
+        orders = await self._collect_all_orders(date_from, date_to)
+        if not orders:
+            return {"revenue": 0, "orders": 0, "avg_check": 0}
+        analysis = await self._analyze_orders(orders)
+        return {
+            "revenue": analysis["total_revenue"],
+            "orders": analysis["total_orders"],
+            "avg_check": analysis["avg_check"],
+        }
+
+    async def get_period_totals_by_dates(self, date_from: str, date_to: str) -> dict:
+        """Агрегированные итоги по явным датам: {revenue, orders, avg_check}"""
+        orders = await self._collect_all_orders(date_from, date_to)
+        if not orders:
+            return {"revenue": 0, "orders": 0, "avg_check": 0}
+        analysis = await self._analyze_orders(orders)
+        return {
+            "revenue": analysis["total_revenue"],
+            "orders": analysis["total_orders"],
+            "avg_check": analysis["avg_check"],
+        }
+
     async def get_sales_summary(self, period: str = "today") -> str:
         today = datetime.now()
         if period == "today":

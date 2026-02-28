@@ -254,6 +254,29 @@ class IikoServerClient:
             logger.error(f"Ошибка OLAP: {e}")
             return {"error": str(e)}
 
+    async def get_period_totals(self, date_from: str, date_to: str) -> dict:
+        """Агрегированные итоги за период: {revenue, orders, avg_check}"""
+        data = await self.get_sales_data(date_from, date_to)
+        if "error" in data:
+            return {"revenue": 0, "orders": 0, "avg_check": 0}
+
+        total_revenue = 0
+        total_orders = 0
+        for row in data.get("day_rows", []):
+            total_revenue += float(
+                row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0
+            )
+            total_orders += float(
+                row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0
+            )
+
+        avg_check = total_revenue / total_orders if total_orders > 0 else 0
+        return {
+            "revenue": total_revenue,
+            "orders": int(total_orders),
+            "avg_check": avg_check,
+        }
+
     # ─── Сводка для Claude ─────────────────────────────────────────────────
 
     async def get_sales_summary(self, date_from: str, date_to: str) -> str:

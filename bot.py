@@ -25,6 +25,7 @@ from config import (
     GOOGLE_SHEET_ID,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
+from charts import generate_yoy_chart
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -126,6 +127,69 @@ async def get_combined_data(period: str) -> str:
     return separator.join(parts)
 
 
+async def get_yoy_totals(period: str) -> tuple:
+    """
+    Собрать агрегированные данные за текущий период и аналогичный прошлогодний.
+    Возвращает (current, previous, label) где current/previous = {revenue, orders, avg_check}.
+    """
+    today = datetime.now()
+    if period == "today":
+        date_from = date_to = today.strftime("%Y-%m-%d")
+        label = f"Сегодня ({today.strftime('%d.%m')})"
+    elif period == "month":
+        date_from = today.replace(day=1).strftime("%Y-%m-%d")
+        date_to = today.strftime("%Y-%m-%d")
+        label = f"Месяц ({today.strftime('%m.%Y')})"
+    else:
+        date_from, date_to, label = _get_period_dates(period)
+
+    # Прошлогодний аналог
+    from_dt = datetime.strptime(date_from, "%Y-%m-%d")
+    to_dt = datetime.strptime(date_to, "%Y-%m-%d")
+    prev_from = from_dt.replace(year=from_dt.year - 1).strftime("%Y-%m-%d")
+    prev_to = to_dt.replace(year=to_dt.year - 1).strftime("%Y-%m-%d")
+
+    # Текущий период: облако + сервер
+    cur_cloud = {"revenue": 0, "orders": 0, "avg_check": 0}
+    cur_server = {"revenue": 0, "orders": 0, "avg_check": 0}
+    try:
+        cur_cloud = await iiko_cloud.get_period_totals_by_dates(date_from, date_to)
+    except Exception as e:
+        logger.warning(f"YoY cloud current: {e}")
+    if iiko_server:
+        try:
+            cur_server = await iiko_server.get_period_totals(date_from, date_to)
+        except Exception as e:
+            logger.warning(f"YoY server current: {e}")
+
+    # Прошлый год: облако + сервер
+    prev_cloud = {"revenue": 0, "orders": 0, "avg_check": 0}
+    prev_server = {"revenue": 0, "orders": 0, "avg_check": 0}
+    try:
+        prev_cloud = await iiko_cloud.get_period_totals_by_dates(prev_from, prev_to)
+    except Exception as e:
+        logger.warning(f"YoY cloud previous: {e}")
+    if iiko_server:
+        try:
+            prev_server = await iiko_server.get_period_totals(prev_from, prev_to)
+        except Exception as e:
+            logger.warning(f"YoY server previous: {e}")
+
+    # Суммируем зал + доставка
+    def _sum(a, b):
+        total_rev = a["revenue"] + b["revenue"]
+        total_ord = a["orders"] + b["orders"]
+        return {
+            "revenue": total_rev,
+            "orders": total_ord,
+            "avg_check": total_rev / total_ord if total_ord > 0 else 0,
+        }
+
+    current = _sum(cur_cloud, cur_server)
+    previous = _sum(prev_cloud, prev_server)
+    return current, previous, label
+
+
 # ─── Команды ───────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,9 +270,22 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def _send_yoy_chart(update: Update, period: str):
+    """Отправить график год-к-году после текстового отчёта"""
+    try:
+        current, previous, label = await get_yoy_totals(period)
+        if current["orders"] == 0 and previous["orders"] == 0:
+            return
+        buf = generate_yoy_chart(current, previous, label)
+        await update.message.reply_photo(photo=buf, caption=f"📈 Год к году: {label}")
+    except Exception as e:
+        logger.warning(f"YoY chart error: {e}")
+
+
 async def cmd_today(update, context):
     await cmd_period(update, context, "today",
         "Полная сводка за сегодня: выручка по залу и доставке отдельно, средний чек, топ блюд, стоп-лист")
+    await _send_yoy_chart(update, "today")
 
 async def cmd_yesterday(update, context):
     await cmd_period(update, context, "yesterday",
@@ -221,6 +298,7 @@ async def cmd_week(update, context):
 async def cmd_month(update, context):
     await cmd_period(update, context, "month",
         "Месячный отчёт: выручка, тренды, ABC-анализ, зал vs доставка, проблемные позиции, рекомендации")
+    await _send_yoy_chart(update, "month")
 
 
 async def _stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
