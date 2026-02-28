@@ -23,9 +23,11 @@ from config import (
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
     GOOGLE_SHEET_ID,
+    YANDEX_EDA_CLIENT_ID, YANDEX_EDA_CLIENT_SECRET,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
+from yandex_eda_client import YandexEdaClient
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -49,6 +51,17 @@ if IIKO_SERVER_LOGIN and IIKO_SERVER_PASSWORD:
     logger.info(f"Локальный iikoServer: {IIKO_SERVER_URL}")
 else:
     logger.info("Локальный iikoServer: не настроен (только облако)")
+
+# Яндекс Еда (доставка)
+yandex_eda = None
+if YANDEX_EDA_CLIENT_ID and YANDEX_EDA_CLIENT_SECRET:
+    yandex_eda = YandexEdaClient(
+        client_id=YANDEX_EDA_CLIENT_ID,
+        client_secret=YANDEX_EDA_CLIENT_SECRET,
+    )
+    logger.info("Яндекс Еда Вендор: подключён")
+else:
+    logger.info("Яндекс Еда Вендор: не настроен")
 
 
 # ─── Google Sheets ────────────────────────────────────────
@@ -95,7 +108,7 @@ def _get_period_dates(period: str):
 
 
 async def get_combined_data(period: str) -> str:
-    """Собрать данные из ОБОИХ источников"""
+    """Собрать данные из ВСЕХ источников"""
     date_from, date_to, label = _get_period_dates(period)
     parts = []
 
@@ -108,12 +121,24 @@ async def get_combined_data(period: str) -> str:
     except Exception as e:
         parts.append(f"⚠️ Стоп-лист: {e}")
 
-    # 2. Данные доставки (облако)
-    try:
-        cloud_data = await iiko_cloud.get_sales_summary(period)
-        parts.append(f"📦 ДОСТАВКА:\n{cloud_data}")
-    except Exception as e:
-        parts.append(f"⚠️ Доставка: {e}")
+    # 2. Данные доставки — приоритет Яндекс Еда, fallback iiko Cloud
+    if yandex_eda:
+        try:
+            eda_data = await yandex_eda.get_sales_summary(date_from, date_to)
+            parts.append(eda_data)
+        except Exception as e:
+            logger.warning(f"Яндекс Еда fallback to iiko: {e}")
+            try:
+                cloud_data = await iiko_cloud.get_sales_summary(period)
+                parts.append(f"📦 ДОСТАВКА (iiko):\n{cloud_data}")
+            except Exception as e2:
+                parts.append(f"⚠️ Доставка: Яндекс Еда: {e}, iiko: {e2}")
+    else:
+        try:
+            cloud_data = await iiko_cloud.get_sales_summary(period)
+            parts.append(f"📦 ДОСТАВКА:\n{cloud_data}")
+        except Exception as e:
+            parts.append(f"⚠️ Доставка: {e}")
 
     # 3. Данные зала (локальный сервер)
     if iiko_server:
@@ -149,26 +174,43 @@ async def get_yoy_totals(period: str) -> tuple:
     prev_from = from_dt.replace(year=from_dt.year - 1).strftime("%Y-%m-%d")
     prev_to = to_dt.replace(year=to_dt.year - 1).strftime("%Y-%m-%d")
 
-    # Текущий период: облако + сервер
-    cur_cloud = {"revenue": 0, "orders": 0, "avg_check": 0}
+    # Текущий период: доставка + зал
+    cur_delivery = {"revenue": 0, "orders": 0, "avg_check": 0}
     cur_server = {"revenue": 0, "orders": 0, "avg_check": 0}
-    try:
-        cur_cloud = await iiko_cloud.get_period_totals_by_dates(date_from, date_to)
-    except Exception as e:
-        logger.warning(f"YoY cloud current: {e}")
+
+    # Доставка: приоритет Яндекс Еда
+    if yandex_eda:
+        try:
+            cur_delivery = await yandex_eda.get_period_totals(date_from, date_to)
+        except Exception as e:
+            logger.warning(f"YoY Яндекс Еда current: {e}")
+    else:
+        try:
+            cur_delivery = await iiko_cloud.get_period_totals_by_dates(date_from, date_to)
+        except Exception as e:
+            logger.warning(f"YoY cloud current: {e}")
+
     if iiko_server:
         try:
             cur_server = await iiko_server.get_period_totals(date_from, date_to)
         except Exception as e:
             logger.warning(f"YoY server current: {e}")
 
-    # Прошлый год: облако + сервер
-    prev_cloud = {"revenue": 0, "orders": 0, "avg_check": 0}
+    # Прошлый год: доставка + зал
+    prev_delivery = {"revenue": 0, "orders": 0, "avg_check": 0}
     prev_server = {"revenue": 0, "orders": 0, "avg_check": 0}
-    try:
-        prev_cloud = await iiko_cloud.get_period_totals_by_dates(prev_from, prev_to)
-    except Exception as e:
-        logger.warning(f"YoY cloud previous: {e}")
+
+    if yandex_eda:
+        try:
+            prev_delivery = await yandex_eda.get_period_totals(prev_from, prev_to)
+        except Exception as e:
+            logger.warning(f"YoY Яндекс Еда previous: {e}")
+    else:
+        try:
+            prev_delivery = await iiko_cloud.get_period_totals_by_dates(prev_from, prev_to)
+        except Exception as e:
+            logger.warning(f"YoY cloud previous: {e}")
+
     if iiko_server:
         try:
             prev_server = await iiko_server.get_period_totals(prev_from, prev_to)
@@ -185,8 +227,8 @@ async def get_yoy_totals(period: str) -> tuple:
             "avg_check": total_rev / total_ord if total_ord > 0 else 0,
         }
 
-    current = _sum(cur_cloud, cur_server)
-    previous = _sum(prev_cloud, prev_server)
+    current = _sum(cur_delivery, cur_server)
+    previous = _sum(prev_delivery, prev_server)
     return current, previous, label
 
 
@@ -479,11 +521,18 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts.append("⚠️ Локальный сервер не настроен — данные кухни недоступны")
 
         # Данные доставки (для полноты картины)
-        try:
-            cloud_data = await iiko_cloud.get_sales_summary(period)
-            parts.append(f"📦 ДОСТАВКА:\n{cloud_data}")
-        except Exception as e:
-            parts.append(f"⚠️ Доставка: {e}")
+        if yandex_eda:
+            try:
+                eda_data = await yandex_eda.get_sales_summary(date_from, date_to)
+                parts.append(eda_data)
+            except Exception as e:
+                parts.append(f"⚠️ Яндекс Еда: {e}")
+        else:
+            try:
+                cloud_data = await iiko_cloud.get_sales_summary(period)
+                parts.append(f"📦 ДОСТАВКА:\n{cloud_data}")
+            except Exception as e:
+                parts.append(f"⚠️ Доставка: {e}")
 
         full_data = ("\n\n" + "═" * 40 + "\n\n").join(parts)
 
@@ -607,6 +656,14 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Облако
         cloud_diag = await iiko_cloud.run_diagnostics()
         parts.append(f"☁️ ОБЛАКО:\n{cloud_diag}")
+
+        # Яндекс Еда
+        if yandex_eda:
+            try:
+                eda_diag = await yandex_eda.run_diagnostics()
+                parts.append(f"\n{eda_diag}")
+            except Exception as e:
+                parts.append(f"\n❌ Яндекс Еда: {e}")
 
         # Локальный сервер
         if iiko_server:

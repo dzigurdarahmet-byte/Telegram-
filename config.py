@@ -37,6 +37,11 @@ COOK_SALARY_PER_SHIFT = float(os.getenv("COOK_SALARY_PER_SHIFT", "0"))
 _cook_roles = os.getenv("COOK_ROLE_CODES", "")
 COOK_ROLE_CODES = [x.strip().lower() for x in _cook_roles.split(",") if x.strip()] if _cook_roles else []
 
+# ─── Яндекс Еда Вендор ──────────────────────────────────
+
+YANDEX_EDA_CLIENT_ID = os.getenv("YANDEX_EDA_CLIENT_ID", "")
+YANDEX_EDA_CLIENT_SECRET = os.getenv("YANDEX_EDA_CLIENT_SECRET", "")
+
 # ─── Google Sheets (зарплаты) ─────────────────────────────
 
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
