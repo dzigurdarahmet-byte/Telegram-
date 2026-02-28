@@ -121,18 +121,19 @@ async def get_combined_data(period: str) -> str:
     except Exception as e:
         parts.append(f"⚠️ Стоп-лист: {e}")
 
-    # 2. Данные доставки — приоритет Яндекс Еда, fallback iiko Cloud
-    if yandex_eda:
+    # 2. Данные доставки — из OLAP iiko Server (по OrderServiceType)
+    if iiko_server:
         try:
-            eda_data = await yandex_eda.get_sales_summary(date_from, date_to)
-            parts.append(eda_data)
+            delivery_data = await iiko_server.get_delivery_sales_summary(date_from, date_to)
+            parts.append(delivery_data)
         except Exception as e:
-            logger.warning(f"Яндекс Еда fallback to iiko: {e}")
+            logger.warning(f"OLAP доставка: {e}")
+            # Фолбэк на iiko Cloud
             try:
                 cloud_data = await iiko_cloud.get_sales_summary(period)
-                parts.append(f"📦 ДОСТАВКА (iiko):\n{cloud_data}")
+                parts.append(f"📦 ДОСТАВКА (iiko Cloud):\n{cloud_data}")
             except Exception as e2:
-                parts.append(f"⚠️ Доставка: Яндекс Еда: {e}, iiko: {e2}")
+                parts.append(f"⚠️ Доставка: {e2}")
     else:
         try:
             cloud_data = await iiko_cloud.get_sales_summary(period)
@@ -178,18 +179,14 @@ async def get_yoy_totals(period: str) -> tuple:
     cur_delivery = {"revenue": 0, "orders": 0, "avg_check": 0}
     cur_server = {"revenue": 0, "orders": 0, "avg_check": 0}
 
-    # Доставка: приоритет Яндекс Еда
-    if yandex_eda:
+    # Доставка: из OLAP iiko Server
+    if iiko_server:
         try:
-            cur_delivery = await yandex_eda.get_period_totals(date_from, date_to)
+            cur_delivery = await iiko_server.get_delivery_period_totals(date_from, date_to)
         except Exception as e:
-            logger.warning(f"YoY Яндекс Еда current: {e}")
-    else:
-        try:
-            cur_delivery = await iiko_cloud.get_period_totals_by_dates(date_from, date_to)
-        except Exception as e:
-            logger.warning(f"YoY cloud current: {e}")
+            logger.warning(f"YoY delivery OLAP current: {e}")
 
+    # Зал: из OLAP iiko Server
     if iiko_server:
         try:
             cur_server = await iiko_server.get_period_totals(date_from, date_to)
@@ -200,16 +197,11 @@ async def get_yoy_totals(period: str) -> tuple:
     prev_delivery = {"revenue": 0, "orders": 0, "avg_check": 0}
     prev_server = {"revenue": 0, "orders": 0, "avg_check": 0}
 
-    if yandex_eda:
+    if iiko_server:
         try:
-            prev_delivery = await yandex_eda.get_period_totals(prev_from, prev_to)
+            prev_delivery = await iiko_server.get_delivery_period_totals(prev_from, prev_to)
         except Exception as e:
-            logger.warning(f"YoY Яндекс Еда previous: {e}")
-    else:
-        try:
-            prev_delivery = await iiko_cloud.get_period_totals_by_dates(prev_from, prev_to)
-        except Exception as e:
-            logger.warning(f"YoY cloud previous: {e}")
+            logger.warning(f"YoY delivery OLAP previous: {e}")
 
     if iiko_server:
         try:
@@ -521,18 +513,12 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts.append("⚠️ Локальный сервер не настроен — данные кухни недоступны")
 
         # Данные доставки (для полноты картины)
-        if yandex_eda:
+        if iiko_server:
             try:
-                eda_data = await yandex_eda.get_sales_summary(date_from, date_to)
-                parts.append(eda_data)
+                delivery_data = await iiko_server.get_delivery_sales_summary(date_from, date_to)
+                parts.append(delivery_data)
             except Exception as e:
-                parts.append(f"⚠️ Яндекс Еда: {e}")
-        else:
-            try:
-                cloud_data = await iiko_cloud.get_sales_summary(period)
-                parts.append(f"📦 ДОСТАВКА:\n{cloud_data}")
-            except Exception as e:
-                parts.append(f"⚠️ Доставка: {e}")
+                parts.append(f"⚠️ Доставка OLAP: {e}")
 
         full_data = ("\n\n" + "═" * 40 + "\n\n").join(parts)
 
@@ -657,20 +643,12 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cloud_diag = await iiko_cloud.run_diagnostics()
         parts.append(f"☁️ ОБЛАКО:\n{cloud_diag}")
 
-        # Яндекс Еда
-        if yandex_eda:
-            try:
-                eda_diag = await yandex_eda.run_diagnostics()
-                parts.append(f"\n{eda_diag}")
-            except Exception as e:
-                parts.append(f"\n❌ Яндекс Еда: {e}")
-
         # Локальный сервер
         if iiko_server:
             server_status = await iiko_server.test_connection()
             parts.append(f"\n🖥️ ЛОКАЛЬНЫЙ СЕРВЕР:\n{server_status}")
 
-            # Тест OLAP
+            # Тест OLAP зала
             yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             today = datetime.now().strftime("%Y-%m-%d")
             try:
@@ -684,6 +662,24 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parts.append(f"✅ OLAP зала: {day_rows} дней, {dish_rows} блюд, {waiter_rows} сотрудников")
             except Exception as e:
                 parts.append(f"❌ OLAP зала: {e}")
+
+            # Тест OLAP доставки
+            try:
+                first_day = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+                del_data = await iiko_server.get_delivery_sales_data(first_day, today)
+                if "error" in del_data:
+                    parts.append(f"❌ OLAP доставки: {del_data['error']}")
+                else:
+                    del_rows = len(del_data.get("day_rows", []))
+                    all_rows = del_data.get("all_types_rows", [])
+                    types = set()
+                    for r in all_rows:
+                        t = r.get("OrderServiceType") or r.get("Тип обслуживания") or "?"
+                        types.add(t)
+                    parts.append(f"✅ OLAP доставки: {del_rows} строк")
+                    parts.append(f"   Типы заказов: {', '.join(sorted(types))}")
+            except Exception as e:
+                parts.append(f"❌ OLAP доставки: {e}")
         else:
             parts.append("\n🖥️ ЛОКАЛЬНЫЙ СЕРВЕР: не настроен")
 

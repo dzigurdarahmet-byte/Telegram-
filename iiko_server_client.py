@@ -61,12 +61,26 @@ class IikoServerClient:
     # ─── OLAP-запросы ─────────────────────────────────────────────────────
 
     async def _olap_request(self, date_from: str, date_to: str,
-                            group_fields: list, aggregate_fields: list) -> list:
+                            group_fields: list, aggregate_fields: list,
+                            extra_filters: dict = None) -> list:
         """
         Один OLAP-запрос с минимальной группировкой.
         Возвращает список строк (dict).
         """
         await self._ensure_token()
+
+        filters = {
+            "OpenDate.Typed": {
+                "filterType": "DateRange",
+                "periodType": "CUSTOM",
+                "from": date_from,
+                "to": date_to,
+                "includeLow": "true",
+                "includeHigh": "true"
+            }
+        }
+        if extra_filters:
+            filters.update(extra_filters)
 
         json_body = {
             "reportType": "SALES",
@@ -74,16 +88,7 @@ class IikoServerClient:
             "groupByRowFields": group_fields,
             "groupByColFields": [],
             "aggregateFields": aggregate_fields,
-            "filters": {
-                "OpenDate.Typed": {
-                    "filterType": "DateRange",
-                    "periodType": "CUSTOM",
-                    "from": date_from,
-                    "to": date_to,
-                    "includeLow": "true",
-                    "includeHigh": "true"
-                }
-            }
+            "filters": filters
         }
 
         response = await self.client.post(
@@ -276,6 +281,173 @@ class IikoServerClient:
             "orders": int(total_orders),
             "avg_check": avg_check,
         }
+
+    # ─── Доставка из OLAP ─────────────────────────────────────────────────
+
+    # Возможные значения OrderServiceType для доставки
+    DELIVERY_TYPES = {
+        "доставка курьером", "доставка самовывоз", "доставка",
+        "delivery_by_courier", "delivery_pickup", "delivery",
+    }
+
+    def _is_delivery_row(self, row: dict) -> bool:
+        """Определить, является ли строка OLAP заказом доставки"""
+        stype = (
+            row.get("OrderServiceType")
+            or row.get("Тип обслуживания")
+            or row.get("Тип заказа")
+            or ""
+        ).strip().lower()
+        return stype in self.DELIVERY_TYPES
+
+    async def get_delivery_sales_data(self, date_from: str, date_to: str) -> dict:
+        """Получить данные о доставке из OLAP — группировка по типу заказа"""
+        try:
+            # Запрос: по дням + тип обслуживания
+            day_rows = await self._olap_request(
+                date_from, date_to,
+                group_fields=["OpenDate.Typed", "OrderServiceType"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt", "UniqOrderId.OrdersCount"]
+            )
+            logger.info(f"OLAP доставка по дням: {len(day_rows)} строк")
+
+            # Фильтруем только доставку
+            delivery_rows = [r for r in day_rows if self._is_delivery_row(r)]
+            logger.info(f"  из них доставка: {len(delivery_rows)} строк")
+
+            # Если нет строк доставки, попробуем проверить все типы
+            if not delivery_rows and day_rows:
+                types = set()
+                for r in day_rows:
+                    t = r.get("OrderServiceType") or r.get("Тип обслуживания") or r.get("Тип заказа") or "?"
+                    types.add(t)
+                logger.info(f"  Доступные типы: {types}")
+
+            # Запрос: блюда доставки
+            dish_rows = []
+            if delivery_rows:
+                try:
+                    all_dish_rows = await self._olap_request(
+                        date_from, date_to,
+                        group_fields=["DishName", "DishGroup", "OrderServiceType"],
+                        aggregate_fields=["DishDiscountSumInt", "DishAmountInt"]
+                    )
+                    dish_rows = [r for r in all_dish_rows if self._is_delivery_row(r)]
+                except Exception as e:
+                    logger.warning(f"OLAP доставка блюда: {e}")
+
+            return {
+                "day_rows": delivery_rows,
+                "dish_rows": dish_rows,
+                "all_types_rows": day_rows,  # для диагностики
+            }
+
+        except Exception as e:
+            logger.error(f"OLAP доставка ошибка: {e}")
+            return {"error": str(e)}
+
+    async def get_delivery_period_totals(self, date_from: str, date_to: str) -> dict:
+        """Агрегированные итоги доставки: {revenue, orders, avg_check}"""
+        data = await self.get_delivery_sales_data(date_from, date_to)
+        if "error" in data:
+            return {"revenue": 0, "orders": 0, "avg_check": 0}
+
+        total_revenue = 0
+        total_orders = 0
+        for row in data.get("day_rows", []):
+            total_revenue += float(
+                row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0
+            )
+            total_orders += float(
+                row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0
+            )
+
+        avg_check = total_revenue / total_orders if total_orders > 0 else 0
+        return {
+            "revenue": total_revenue,
+            "orders": int(total_orders),
+            "avg_check": avg_check,
+        }
+
+    async def get_delivery_sales_summary(self, date_from: str, date_to: str) -> str:
+        """Сводка продаж доставки из OLAP для Claude"""
+        data = await self.get_delivery_sales_data(date_from, date_to)
+
+        if "error" in data:
+            return f"⚠️ Ошибка данных доставки: {data['error']}"
+
+        day_rows = data.get("day_rows", [])
+        if not day_rows:
+            # Показываем какие типы вообще есть
+            all_rows = data.get("all_types_rows", [])
+            types = set()
+            for r in all_rows:
+                t = r.get("OrderServiceType") or r.get("Тип обслуживания") or "?"
+                types.add(t)
+            return (
+                f"📦 Доставка ({date_from} — {date_to}): заказов доставки не найдено.\n"
+                f"Доступные типы заказов в OLAP: {', '.join(sorted(types))}"
+            )
+
+        total_revenue = 0
+        total_revenue_full = 0
+        total_qty = 0
+        total_orders = 0
+        day_stats = {}
+
+        for row in day_rows:
+            date = row.get("OpenDate.Typed") or row.get("Учетный день") or ""
+            revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+            revenue_full = float(row.get("DishSumInt") or row.get("Сумма без скидки") or 0)
+            qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+            orders = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
+
+            total_revenue += revenue
+            total_revenue_full += revenue_full
+            total_qty += qty
+            total_orders += orders
+
+            if date:
+                if date not in day_stats:
+                    day_stats[date] = {"revenue": 0, "orders": 0, "qty": 0}
+                day_stats[date]["revenue"] += revenue
+                day_stats[date]["orders"] += orders
+                day_stats[date]["qty"] += qty
+
+        lines = [
+            f"📦 === ДОСТАВКА — OLAP ({date_from} — {date_to}) ===",
+            f"Выручка (со скидкой): {total_revenue:.0f} руб.",
+            f"Выручка (без скидки): {total_revenue_full:.0f} руб.",
+            f"Заказов: {total_orders:.0f}",
+            f"Блюд продано: {total_qty:.0f} шт",
+        ]
+        if total_orders > 0:
+            lines.append(f"Средний чек: {total_revenue / total_orders:.0f} руб.")
+
+        if day_stats:
+            lines.append("")
+            lines.append("По дням:")
+            for day in sorted(day_stats.keys()):
+                d = day_stats[day]
+                lines.append(f"  {day} | {d['revenue']:.0f} руб. | {d['orders']:.0f} заказов")
+
+        # Топ блюд доставки
+        dish_rows = data.get("dish_rows", [])
+        if dish_rows:
+            lines.append("")
+            lines.append("Топ блюд доставки:")
+            dish_list = []
+            for row in dish_rows:
+                name = row.get("DishName") or row.get("Блюдо") or "?"
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                revenue = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                dish_list.append({"name": name, "qty": qty, "revenue": revenue})
+
+            for d in sorted(dish_list, key=lambda x: x["revenue"], reverse=True)[:20]:
+                lines.append(f"  {d['name']} | {d['qty']:.0f} шт | {d['revenue']:.0f} руб.")
+
+        return "\n".join(lines)
 
     # ─── Сводка для Claude ─────────────────────────────────────────────────
 
