@@ -26,7 +26,7 @@ class IikoClient:
         self.token_expires: Optional[datetime] = None
         self.organization_id: Optional[str] = None
         self.terminal_group_id: Optional[str] = None
-        self.client = httpx.AsyncClient(timeout=60.0)
+        self.client = httpx.AsyncClient(timeout=120.0)
         self._nomenclature_cache = None
         self._nomenclature_cache_time = None
 
@@ -360,7 +360,8 @@ class IikoClient:
                 if orders:
                     methods_success.append(f"deliveries: {len(orders)} заказов")
         except Exception as e:
-            logger.warning(f"deliveries не сработал: {e}")
+            logger.error(f"deliveries не сработал ({date_from}—{date_to}): {e}")
+            methods_success.append(f"ОШИБКА: {e}")
 
         # Фильтруем удалённые заказы
         filtered = []
