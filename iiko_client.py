@@ -194,11 +194,14 @@ class IikoClient:
     }
 
     def _is_bar_item(self, name: str, group: str) -> bool:
-        """Определить, относится ли позиция к бару"""
+        """Определить, относится ли позиция к бару (по группе ИЛИ по названию)"""
         g = group.lower().strip()
+        n = name.lower().strip()
         if g in self.BAR_GROUPS:
             return True
-        return any(kw in g for kw in self.BAR_KEYWORDS)
+        if any(kw in g for kw in self.BAR_KEYWORDS):
+            return True
+        return any(kw in n for kw in self.BAR_KEYWORDS)
 
     async def _get_stop_list_items(self, extra_products: dict = None) -> dict:
         """Получить все позиции стоп-листа, разделённые по категориям.
