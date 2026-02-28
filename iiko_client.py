@@ -334,34 +334,66 @@ class IikoClient:
 
     # ─── ПОЛУЧЕНИЕ ЗАКАЗОВ (все способы) ───────────────────
 
+    async def _fetch_orders_chunk(self, org_id: str, date_from: str, date_to: str) -> list:
+        """Один запрос заказов за короткий диапазон дат"""
+        data = await self._post("/api/1/deliveries/by_delivery_date_and_status", {
+            "organizationIds": [org_id],
+            "deliveryDateFrom": f"{date_from} 00:00:00.000",
+            "deliveryDateTo": f"{date_to} 23:59:59.999",
+            "statuses": [
+                "Unconfirmed", "WaitCooking", "ReadyForCooking",
+                "CookingStarted", "CookingCompleted", "Waiting",
+                "OnWay", "Delivered", "Closed", "Cancelled"
+            ]
+        })
+        orders = []
+        for org in data.get("ordersByOrganizations", []):
+            orders.extend(org.get("orders", []))
+        return orders
+
     async def _collect_all_orders(self, date_from: str, date_to: str) -> list:
-        """Собрать все заказы всеми доступными способами"""
+        """Собрать все заказы. Длинные диапазоны разбиваются на недельные чанки."""
         org_id = await self.get_organization_id()
         all_orders = []
         methods_tried = []
         methods_success = []
+        errors = []
 
-        # Заказы доставки по дате и статусу (все статусы включая отменённые)
-        try:
+        dt_from = datetime.strptime(date_from, "%Y-%m-%d")
+        dt_to = datetime.strptime(date_to, "%Y-%m-%d")
+        span_days = (dt_to - dt_from).days
+
+        # Если диапазон > 7 дней — разбиваем на недельные чанки
+        if span_days > 7:
+            methods_tried.append(f"deliveries/chunks ({date_from}—{date_to})")
+            chunk_start = dt_from
+            while chunk_start <= dt_to:
+                chunk_end = min(chunk_start + timedelta(days=6), dt_to)
+                c_from = chunk_start.strftime("%Y-%m-%d")
+                c_to = chunk_end.strftime("%Y-%m-%d")
+                try:
+                    chunk_orders = await self._fetch_orders_chunk(org_id, c_from, c_to)
+                    all_orders.extend(chunk_orders)
+                    if chunk_orders:
+                        methods_success.append(f"{c_from}→{c_to}: {len(chunk_orders)}")
+                    logger.info(f"Чанк {c_from}—{c_to}: {len(chunk_orders)} заказов")
+                except Exception as e:
+                    logger.error(f"Чанк {c_from}—{c_to} ошибка: {e}")
+                    errors.append(f"{c_from}→{c_to}: {e}")
+                chunk_start = chunk_end + timedelta(days=1)
+        else:
             methods_tried.append("deliveries/by_delivery_date_and_status")
-            data = await self._post("/api/1/deliveries/by_delivery_date_and_status", {
-                "organizationIds": [org_id],
-                "deliveryDateFrom": f"{date_from} 00:00:00.000",
-                "deliveryDateTo": f"{date_to} 23:59:59.999",
-                "statuses": [
-                    "Unconfirmed", "WaitCooking", "ReadyForCooking",
-                    "CookingStarted", "CookingCompleted", "Waiting",
-                    "OnWay", "Delivered", "Closed", "Cancelled"
-                ]
-            })
-            for org in data.get("ordersByOrganizations", []):
-                orders = org.get("orders", [])
-                all_orders.extend(orders)
-                if orders:
-                    methods_success.append(f"deliveries: {len(orders)} заказов")
-        except Exception as e:
-            logger.error(f"deliveries не сработал ({date_from}—{date_to}): {e}")
-            methods_success.append(f"ОШИБКА: {e}")
+            try:
+                chunk_orders = await self._fetch_orders_chunk(org_id, date_from, date_to)
+                all_orders.extend(chunk_orders)
+                if chunk_orders:
+                    methods_success.append(f"deliveries: {len(chunk_orders)} заказов")
+            except Exception as e:
+                logger.error(f"deliveries не сработал ({date_from}—{date_to}): {e}")
+                errors.append(str(e))
+
+        if errors:
+            methods_success.append(f"ОШИБКИ: {'; '.join(errors)}")
 
         # Фильтруем удалённые заказы
         filtered = []
