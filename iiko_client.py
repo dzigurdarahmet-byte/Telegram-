@@ -185,9 +185,20 @@ class IikoClient:
         "соки&морс&gazirovka", "water",
     }
 
+    # Ключевые слова — если группа содержит любое из них, это бар
+    BAR_KEYWORDS = {
+        "вино", "вин", "коктейл", "пиво", "виски", "водка", "джин",
+        "ром", "текила", "коньяк", "бренди", "ликер", "настойк",
+        "вермут", "шампанск", "игрист", "кофе", "чай", "сок",
+        "лимонад", "напиток", "милкшейк", "вода", "water", "бар",
+    }
+
     def _is_bar_item(self, name: str, group: str) -> bool:
         """Определить, относится ли позиция к бару"""
-        return group.lower().strip() in self.BAR_GROUPS
+        g = group.lower().strip()
+        if g in self.BAR_GROUPS:
+            return True
+        return any(kw in g for kw in self.BAR_KEYWORDS)
 
     async def _get_stop_list_items(self, extra_products: dict = None) -> dict:
         """Получить все позиции стоп-листа, разделённые по категориям.
