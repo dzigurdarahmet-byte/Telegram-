@@ -189,19 +189,27 @@ class IikoClient:
         """Определить, относится ли позиция к бару"""
         return group.lower().strip() in self.BAR_GROUPS
 
-    async def get_stop_list_summary(self, extra_products: dict = None) -> str:
+    async def _get_stop_list_items(self, extra_products: dict = None) -> dict:
+        """Получить все позиции стоп-листа, разделённые по категориям.
+
+        Возвращает dict с ключами:
+            bar_stop — бар, полный стоп (balance <= 0)
+            bar_limits — бар, ограничения (balance > 0)
+            kitchen_stop — кухня, полный стоп
+            kitchen_limits — кухня, ограничения
+        """
         data = await self.get_stop_lists()
-        # Сбрасываем кэш номенклатуры для актуальных данных
         self._nomenclature_cache = None
         product_map = await self._get_product_map()
-        # Дополняем картой из локального сервера
         if extra_products:
             for key, name in extra_products.items():
                 if key not in product_map:
                     product_map[key] = {"name": name, "group": "Другое", "price": 0, "type": ""}
 
-        bar_items = []
-        kitchen_items = []
+        result = {
+            "bar_stop": [], "bar_limits": [],
+            "kitchen_stop": [], "kitchen_limits": [],
+        }
 
         for org_data in data.get("terminalGroupStopLists", []):
             for tg in org_data.get("items", []):
@@ -213,31 +221,102 @@ class IikoClient:
                     group = product_info.get("group", "")
                     balance = item.get("balance", 0)
 
-                    if balance <= 0:
-                        status = "нет в наличии"
-                    else:
-                        status = f"остаток: {balance:.0f}"
                     label = name or (f"арт. {sku}" if sku else None)
                     if not label:
                         continue
 
-                    line = f"  🔴 {label} — {status}"
-                    if self._is_bar_item(name, group):
-                        bar_items.append(line)
+                    is_bar = self._is_bar_item(name, group)
+                    if balance <= 0:
+                        line = f"  🔴 {label} — нет в наличии"
+                        key = "bar_stop" if is_bar else "kitchen_stop"
                     else:
-                        kitchen_items.append(line)
+                        line = f"  🟡 {label} — остаток: {balance:.0f}"
+                        key = "bar_limits" if is_bar else "kitchen_limits"
+                    result[key].append(line)
 
-        if not bar_items and not kitchen_items:
-            return "✅ Стоп-лист пуст — все позиции в наличии!"
+        return result
 
-        parts = []
-        if kitchen_items:
-            parts.append(f"🍽️ КУХНЯ ({len(kitchen_items)}):\n" + "\n".join(kitchen_items))
-        if bar_items:
-            parts.append(f"🍷 БАР ({len(bar_items)}):\n" + "\n".join(bar_items))
+    async def get_stop_list_summary(self, extra_products: dict = None,
+                                    view: str = "full") -> str:
+        """Стоп-лист с фильтрацией.
 
-        total = len(bar_items) + len(kitchen_items)
-        return f"🚫 Стоп-лист ({total} позиций):\n\n" + "\n\n".join(parts)
+        view:
+            full     — всё (бар + кухня, стоп + ограничения)
+            bar      — только бар (стоп + ограничения)
+            kitchen   — только кухня (стоп + ограничения)
+            stop     — только полный стоп (бар + кухня, balance <= 0)
+            limits   — только ограничения (бар + кухня, balance > 0)
+        """
+        items = await self._get_stop_list_items(extra_products)
+
+        if view == "bar":
+            stop = items["bar_stop"]
+            limits = items["bar_limits"]
+            if not stop and not limits:
+                return "✅ Стоп-лист бара пуст — все позиции в наличии!"
+            parts = []
+            if stop:
+                parts.append(f"🔴 ПОЛНЫЙ СТОП ({len(stop)}):\n" + "\n".join(stop))
+            if limits:
+                parts.append(f"🟡 ОГРАНИЧЕНИЯ ({len(limits)}):\n" + "\n".join(limits))
+            total = len(stop) + len(limits)
+            return f"🍷 Стоп-лист БАРА ({total} позиций):\n\n" + "\n\n".join(parts)
+
+        elif view == "kitchen":
+            stop = items["kitchen_stop"]
+            limits = items["kitchen_limits"]
+            if not stop and not limits:
+                return "✅ Стоп-лист кухни пуст — все позиции в наличии!"
+            parts = []
+            if stop:
+                parts.append(f"🔴 ПОЛНЫЙ СТОП ({len(stop)}):\n" + "\n".join(stop))
+            if limits:
+                parts.append(f"🟡 ОГРАНИЧЕНИЯ ({len(limits)}):\n" + "\n".join(limits))
+            total = len(stop) + len(limits)
+            return f"🍽️ Стоп-лист КУХНИ ({total} позиций):\n\n" + "\n\n".join(parts)
+
+        elif view == "stop":
+            bar_s = items["bar_stop"]
+            kit_s = items["kitchen_stop"]
+            if not bar_s and not kit_s:
+                return "✅ Полный стоп пуст — нет позиций с нулевым остатком!"
+            parts = []
+            if kit_s:
+                parts.append(f"🍽️ КУХНЯ ({len(kit_s)}):\n" + "\n".join(kit_s))
+            if bar_s:
+                parts.append(f"🍷 БАР ({len(bar_s)}):\n" + "\n".join(bar_s))
+            total = len(bar_s) + len(kit_s)
+            return f"🔴 Полный СТОП ({total} позиций):\n\n" + "\n\n".join(parts)
+
+        elif view == "limits":
+            bar_l = items["bar_limits"]
+            kit_l = items["kitchen_limits"]
+            if not bar_l and not kit_l:
+                return "✅ Ограничений нет — все позиции без лимитов!"
+            parts = []
+            if kit_l:
+                parts.append(f"🍽️ КУХНЯ ({len(kit_l)}):\n" + "\n".join(kit_l))
+            if bar_l:
+                parts.append(f"🍷 БАР ({len(bar_l)}):\n" + "\n".join(bar_l))
+            total = len(bar_l) + len(kit_l)
+            return f"🟡 ОГРАНИЧЕНИЯ ({total} позиций):\n\n" + "\n\n".join(parts)
+
+        else:  # full
+            all_stop = items["bar_stop"] + items["kitchen_stop"]
+            all_limits = items["bar_limits"] + items["kitchen_limits"]
+            if not all_stop and not all_limits:
+                return "✅ Стоп-лист пуст — все позиции в наличии!"
+            parts = []
+            if items["kitchen_stop"]:
+                parts.append(f"🍽️ КУХНЯ — стоп ({len(items['kitchen_stop'])}):\n" + "\n".join(items["kitchen_stop"]))
+            if items["kitchen_limits"]:
+                parts.append(f"🍽️ КУХНЯ — ограничения ({len(items['kitchen_limits'])}):\n" + "\n".join(items["kitchen_limits"]))
+            if items["bar_stop"]:
+                parts.append(f"🍷 БАР — стоп ({len(items['bar_stop'])}):\n" + "\n".join(items["bar_stop"]))
+            if items["bar_limits"]:
+                parts.append(f"🍷 БАР — ограничения ({len(items['bar_limits'])}):\n" + "\n".join(items["bar_limits"]))
+            total = len(all_stop) + len(all_limits)
+            return f"🚫 Стоп-лист ({total} позиций):\n\n" + "\n\n".join(parts)
 
     # ─── ПОЛУЧЕНИЕ ЗАКАЗОВ (все способы) ───────────────────
 

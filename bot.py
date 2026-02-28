@@ -143,8 +143,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /yesterday — сводка за вчера\n"
         "  /week — отчёт за неделю\n"
         "  /month — отчёт за месяц\n\n"
-        "🚫 *Оперативка*\n"
-        "  /stop — текущий стоп-лист\n"
+        "🚫 *Стоп-лист*\n"
+        "  /stop — полный стоп-лист (всё)\n"
+        "  /stop\\_bar — стоп-лист бара\n"
+        "  /stop\\_kitchen — стоп-лист кухни\n"
+        "  /stop\\_full — только полный стоп\n"
+        "  /stop\\_limits — только ограничения\n"
         "  /menu — информация по меню\n\n"
         "👨‍🍳 *Сотрудники и кухня*\n"
         "  /staff — отчёт по сотрудникам\n"
@@ -219,19 +223,42 @@ async def cmd_month(update, context):
         "Месячный отчёт: выручка, тренды, ABC-анализ, зал vs доставка, проблемные позиции, рекомендации")
 
 
-async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        view: str, label: str):
+    """Общий обработчик для всех команд стоп-листа"""
     if not check_access(update.effective_user.id):
         return
-    msg = await update.message.reply_text("⏳ Проверяю стоп-лист...")
+    msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
     try:
-        # Подтягиваем продукты с локального сервера для полных названий
         extra = {}
         if iiko_server:
             extra = await iiko_server.get_products()
-        data = await iiko_cloud.get_stop_list_summary(extra_products=extra)
+        data = await iiko_cloud.get_stop_list_summary(
+            extra_products=extra, view=view
+        )
         await msg.edit_text(data)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _stop_handler(update, context, "full", "стоп-лист")
+
+
+async def cmd_stop_bar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _stop_handler(update, context, "bar", "стоп-лист бара")
+
+
+async def cmd_stop_kitchen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _stop_handler(update, context, "kitchen", "стоп-лист кухни")
+
+
+async def cmd_stop_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _stop_handler(update, context, "stop", "полный стоп")
+
+
+async def cmd_stop_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _stop_handler(update, context, "limits", "ограничения")
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -610,7 +637,11 @@ async def post_init(application: Application):
         BotCommand("yesterday", "Сводка за вчера"),
         BotCommand("week", "Отчёт за неделю"),
         BotCommand("month", "Отчёт за месяц"),
-        BotCommand("stop", "Стоп-лист"),
+        BotCommand("stop", "Стоп-лист (всё)"),
+        BotCommand("stop_bar", "Стоп-лист бара"),
+        BotCommand("stop_kitchen", "Стоп-лист кухни"),
+        BotCommand("stop_full", "Полный стоп"),
+        BotCommand("stop_limits", "Ограничения"),
         BotCommand("menu", "Меню"),
         BotCommand("staff", "Сотрудники"),
         BotCommand("cooks", "Производительность поваров"),
@@ -634,6 +665,10 @@ def main():
     app.add_handler(CommandHandler("week", cmd_week))
     app.add_handler(CommandHandler("month", cmd_month))
     app.add_handler(CommandHandler("stop", cmd_stop))
+    app.add_handler(CommandHandler("stop_bar", cmd_stop_bar))
+    app.add_handler(CommandHandler("stop_kitchen", cmd_stop_kitchen))
+    app.add_handler(CommandHandler("stop_full", cmd_stop_full))
+    app.add_handler(CommandHandler("stop_limits", cmd_stop_limits))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("staff", cmd_staff))
     app.add_handler(CommandHandler("abc", cmd_abc))
