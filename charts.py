@@ -1,6 +1,6 @@
 """
 Генерация графиков год-к-году (YoY) для отчётов /today и /month
-Стиль: Warm Coral — тёмно-фиолетовый фон, коралловые столбцы с золотой рамкой
+Стиль: GitHub Neon — тёмный фон, голубые столбцы
 """
 
 import io
@@ -12,18 +12,17 @@ from matplotlib.ticker import FuncFormatter
 from matplotlib.patches import Patch
 
 
-# ─── Палитра: Warm Coral ─────────────────────────────────
+# ─── Палитра: GitHub Neon ────────────────────────────────
 
-BG_COLOR = "#1a1423"
-CARD_COLOR = "#231c30"
-TEXT_COLOR = "#f8f0e3"
-TEXT_MUTED = "#a89bb5"
-COLOR_CURRENT = "#ff6b6b"
-COLOR_PREVIOUS = "#2a2440"
-COLOR_UP = "#6bcb77"
-COLOR_DOWN = "#ff6b6b"
-GRID_COLOR = "#2a2440"
-EDGE_CURRENT = "#ffd93d"
+BG_COLOR = "#0d1117"
+CARD_COLOR = "#161b22"
+TEXT_COLOR = "#f0f6fc"
+TEXT_MUTED = "#8b949e"
+COLOR_CURRENT = "#58a6ff"
+COLOR_PREVIOUS = "#30363d"
+COLOR_UP = "#3fb950"
+COLOR_DOWN = "#f85149"
+GRID_COLOR = "#21262d"
 
 
 def _fmt_number(value: float) -> str:
@@ -74,10 +73,7 @@ def generate_yoy_chart(current: dict, previous: dict, label: str) -> io.BytesIO:
         bars = ax.bar(
             [0, 1], [prev_val, cur_val],
             color=[COLOR_PREVIOUS, COLOR_CURRENT],
-            width=0.50,
-            edgecolor=["none", EDGE_CURRENT],
-            linewidth=[0, 2],
-            zorder=3,
+            width=0.50, edgecolor="none", zorder=3,
         )
 
         # Подписи значений
@@ -137,7 +133,7 @@ def generate_yoy_chart(current: dict, previous: dict, label: str) -> io.BytesIO:
     fig.legend(
         handles=[
             Patch(facecolor=COLOR_PREVIOUS, label="Прошлый год"),
-            Patch(facecolor=COLOR_CURRENT, edgecolor=EDGE_CURRENT, linewidth=2, label="Этот год"),
+            Patch(facecolor=COLOR_CURRENT, label="Этот год"),
         ],
         loc="lower center", ncol=2, frameon=False,
         fontsize=11, labelcolor=TEXT_MUTED,
