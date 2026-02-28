@@ -103,7 +103,7 @@ async def get_combined_data(period: str) -> str:
         extra = {}
         if iiko_server:
             extra = await iiko_server.get_products()
-        parts.append(await iiko_cloud.get_stop_list_summary(extra_products=extra))
+        parts.append(await iiko_cloud.get_stop_list_summary(extra_products=extra, view="stop"))
     except Exception as e:
         parts.append(f"⚠️ Стоп-лист: {e}")
 
