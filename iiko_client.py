@@ -700,13 +700,14 @@ class IikoClient:
         try:
             orders = await self._collect_all_orders(date_from, date_to)
             if not orders:
-                diag = ""
+                diag_lines = [f"📊 За период {label} ({date_from} — {date_to}) заказов не найдено."]
                 if hasattr(self, '_last_diag'):
-                    diag = f"\n\nДиагностика: проверены эндпоинты: {', '.join(self._last_diag['methods_tried'])}"
-                return (
-                    f"📊 За период {label} ({date_from} — {date_to}) заказов не найдено."
-                    f"{diag}"
-                )
+                    d = self._last_diag
+                    diag_lines.append(f"\n--- Диагностика ---")
+                    diag_lines.append(f"Метод: {', '.join(d.get('methods_tried', []))}")
+                    diag_lines.append(f"Результаты: {', '.join(d.get('methods_success', [])) or 'пусто'}")
+                    diag_lines.append(f"Всего от API: {d.get('total_orders', 0)}, удалённых: {d.get('deleted_orders', 0)}")
+                return "\n".join(diag_lines)
 
             analysis = await self._analyze_orders(orders)
             return self._format_analysis(analysis, label, date_from, date_to)
