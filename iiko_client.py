@@ -335,21 +335,33 @@ class IikoClient:
     # ─── ПОЛУЧЕНИЕ ЗАКАЗОВ (все способы) ───────────────────
 
     async def _fetch_orders_chunk(self, org_id: str, date_from: str, date_to: str) -> list:
-        """Один запрос заказов за короткий диапазон дат"""
-        data = await self._post("/api/1/deliveries/by_delivery_date_and_status", {
-            "organizationIds": [org_id],
-            "deliveryDateFrom": f"{date_from} 00:00:00.000",
-            "deliveryDateTo": f"{date_to} 23:59:59.999",
-            "statuses": [
-                "Unconfirmed", "WaitCooking", "ReadyForCooking",
-                "CookingStarted", "CookingCompleted", "Waiting",
-                "OnWay", "Delivered", "Closed", "Cancelled"
-            ]
-        })
-        orders = []
-        for org in data.get("ordersByOrganizations", []):
-            orders.extend(org.get("orders", []))
-        return orders
+        """Один запрос заказов за короткий диапазон дат с retry"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                data = await self._post("/api/1/deliveries/by_delivery_date_and_status", {
+                    "organizationIds": [org_id],
+                    "deliveryDateFrom": f"{date_from} 00:00:00.000",
+                    "deliveryDateTo": f"{date_to} 23:59:59.999",
+                    "statuses": [
+                        "Unconfirmed", "WaitCooking", "ReadyForCooking",
+                        "CookingStarted", "CookingCompleted", "Waiting",
+                        "OnWay", "Delivered", "Closed", "Cancelled"
+                    ]
+                })
+                orders = []
+                for org in data.get("ordersByOrganizations", []):
+                    orders.extend(org.get("orders", []))
+                return orders
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * 3  # 3s, 6s
+                    logger.warning(f"Retry {attempt+1}/{max_retries} for {date_from}: {e}, wait {wait}s")
+                    await asyncio.sleep(wait)
+                    # Принудительно обновляем токен при ошибке
+                    self.token = None
+                else:
+                    raise
 
     async def _collect_all_orders(self, date_from: str, date_to: str) -> list:
         """Собрать все заказы. Диапазоны > 1 дня разбиваются на однодневные запросы."""
@@ -363,12 +375,23 @@ class IikoClient:
         dt_to = datetime.strptime(date_to, "%Y-%m-%d")
         span_days = (dt_to - dt_from).days
 
-        # Всегда разбиваем на однодневные запросы (iiko API стабильно работает только с 1 днём)
         if span_days > 0:
-            methods_tried.append(f"deliveries/daily_chunks ({date_from}—{date_to}, {span_days + 1} дней)")
+            methods_tried.append(f"deliveries/daily ({date_from}—{date_to}, {span_days + 1} дней)")
+            # Принудительно обновляем токен перед большой серией запросов
+            self.token = None
+            await self._ensure_token()
+
             current_day = dt_from
+            request_count = 0
             while current_day <= dt_to:
                 day_str = current_day.strftime("%Y-%m-%d")
+
+                # Обновляем токен каждые 10 запросов
+                if request_count > 0 and request_count % 10 == 0:
+                    self.token = None
+                    await self._ensure_token()
+                    await asyncio.sleep(1)
+
                 try:
                     chunk_orders = await self._fetch_orders_chunk(org_id, day_str, day_str)
                     all_orders.extend(chunk_orders)
@@ -376,12 +399,14 @@ class IikoClient:
                         methods_success.append(f"{day_str}: {len(chunk_orders)}")
                     logger.info(f"День {day_str}: {len(chunk_orders)} заказов")
                 except Exception as e:
-                    logger.error(f"День {day_str} ошибка: {e}")
+                    logger.error(f"День {day_str} ошибка (после retry): {e}")
                     errors.append(f"{day_str}: {e}")
+
                 current_day += timedelta(days=1)
-                # Пауза между запросами для избежания rate-limit
+                request_count += 1
+                # Пауза 2с между запросами
                 if current_day <= dt_to:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(2)
         else:
             methods_tried.append("deliveries/by_delivery_date_and_status")
             try:
@@ -392,9 +417,6 @@ class IikoClient:
             except Exception as e:
                 logger.error(f"deliveries не сработал ({date_from}—{date_to}): {e}")
                 errors.append(str(e))
-
-        if errors:
-            methods_success.append(f"ОШИБКИ: {'; '.join(errors)}")
 
         # Фильтруем удалённые заказы
         filtered = []
@@ -408,6 +430,7 @@ class IikoClient:
 
         logger.info(
             f"Пробовали: {methods_tried}. Успешно: {methods_success}. "
+            f"Ошибки: {len(errors)}. "
             f"Всего: {len(all_orders)}, удалённых: {deleted_count}, итого: {len(filtered)}"
         )
 
@@ -416,7 +439,11 @@ class IikoClient:
             "methods_tried": methods_tried,
             "methods_success": methods_success,
             "total_orders": len(filtered),
-            "deleted_orders": deleted_count
+            "deleted_orders": deleted_count,
+            "errors": errors,
+            "error_count": len(errors),
+            "days_total": span_days + 1 if span_days > 0 else 1,
+            "days_ok": (span_days + 1 - len(errors)) if span_days > 0 else (0 if errors else 1),
         }
 
         return filtered
@@ -626,10 +653,15 @@ class IikoClient:
 
         # Диагностика
         if hasattr(self, '_last_diag'):
+            d = self._last_diag
             lines.append("")
             lines.append("--- Диагностика ---")
-            lines.append(f"Источники данных: {', '.join(self._last_diag['methods_success']) or 'нет данных'}")
-            lines.append(f"Проверены: {', '.join(self._last_diag['methods_tried'])}")
+            lines.append(f"Источники данных: {', '.join(d['methods_success']) or 'нет данных'}")
+            lines.append(f"Проверены: {', '.join(d['methods_tried'])}")
+            lines.append(f"Дней: {d.get('days_ok', '?')}/{d.get('days_total', '?')} успешно, "
+                         f"заказов: {d.get('total_orders', 0)}, удалённых: {d.get('deleted_orders', 0)}")
+            if d.get('errors'):
+                lines.append(f"⚠️ Ошибки ({d['error_count']}): {'; '.join(d['errors'][:5])}")
 
         return "\n".join(lines)
 
@@ -707,7 +739,10 @@ class IikoClient:
                     diag_lines.append(f"\n--- Диагностика ---")
                     diag_lines.append(f"Метод: {', '.join(d.get('methods_tried', []))}")
                     diag_lines.append(f"Результаты: {', '.join(d.get('methods_success', [])) or 'пусто'}")
+                    diag_lines.append(f"Дней: {d.get('days_ok', '?')}/{d.get('days_total', '?')} успешно")
                     diag_lines.append(f"Всего от API: {d.get('total_orders', 0)}, удалённых: {d.get('deleted_orders', 0)}")
+                    if d.get('errors'):
+                        diag_lines.append(f"⚠️ Ошибки ({d['error_count']}): {'; '.join(d['errors'][:5])}")
                 return "\n".join(diag_lines)
 
             analysis = await self._analyze_orders(orders)
