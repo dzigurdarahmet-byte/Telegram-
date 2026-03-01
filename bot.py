@@ -247,7 +247,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /stop — полный стоп-лист (всё)\n"
         "  /stop\\_bar — стоп-лист бара\n"
         "  /stop\\_kitchen — стоп-лист кухни\n"
-        "  /stop\\_full — только полный стоп\n"
         "  /stop\\_limits — только ограничения\n"
         "  /menu — информация по меню\n\n"
         "👨‍🍳 *Сотрудники и кухня*\n"
@@ -378,8 +377,6 @@ async def cmd_stop_kitchen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _stop_handler(update, context, "kitchen", "стоп-лист кухни")
 
 
-async def cmd_stop_full(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _stop_handler(update, context, "stop", "полный стоп")
 
 
 async def cmd_stop_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -784,7 +781,6 @@ async def post_init(application: Application):
         BotCommand("stop", "Стоп-лист (всё)"),
         BotCommand("stop_bar", "Стоп-лист бара"),
         BotCommand("stop_kitchen", "Стоп-лист кухни"),
-        BotCommand("stop_full", "Полный стоп"),
         BotCommand("stop_limits", "Ограничения"),
         BotCommand("menu", "Меню"),
         BotCommand("staff", "Сотрудники"),
@@ -811,7 +807,6 @@ def main():
     app.add_handler(CommandHandler("stop", cmd_stop))
     app.add_handler(CommandHandler("stop_bar", cmd_stop_bar))
     app.add_handler(CommandHandler("stop_kitchen", cmd_stop_kitchen))
-    app.add_handler(CommandHandler("stop_full", cmd_stop_full))
     app.add_handler(CommandHandler("stop_limits", cmd_stop_limits))
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("staff", cmd_staff))
