@@ -196,18 +196,6 @@ class IikoClient:
         "флэт", "матча", "какао", "морс", "смузи",
     }
 
-    # Категории кухни — порядок проверки = порядок вывода
-    KITCHEN_CATEGORIES = [
-        ("🍕 Пицца неаполитанская", {"пицца"}),
-        ("🍣 Роллы", {"ролл"}),
-        ("🥗 Закуски", {"закуск"}),
-        ("🥬 Салаты", {"салат"}),
-        ("🍝 Пасты", {"паст", "спагетти"}),
-        ("🥩 Горячие блюда", {"горяч", "основн", "стейк", "гриль"}),
-        ("🍲 Супы", {"суп"}),
-        ("🍰 Десерты", {"десерт", "торт", "чизкейк"}),
-    ]
-
     def _is_bar_item(self, name: str, group: str) -> bool:
         """Определить, относится ли позиция к бару (по группе ИЛИ по названию)"""
         g = group.lower().strip()
@@ -263,30 +251,8 @@ class IikoClient:
                     else:
                         line = f"  🟡 {label} — остаток: {balance:.0f}"
                         key = "bar_limits" if is_bar else "kitchen_limits"
-                    result[key].append({"line": line, "group": group})
+                    result[key].append(line)
 
-        return result
-
-    def _group_kitchen_by_category(self, items: list[dict]) -> list[tuple[str, list[str]]]:
-        """Группирует кухонные позиции по категориям меню."""
-        categories = {}  # category_name -> [lines]
-        for item in items:
-            group_lower = item["group"].lower()
-            matched = False
-            for cat_name, keywords in self.KITCHEN_CATEGORIES:
-                if any(kw in group_lower for kw in keywords):
-                    categories.setdefault(cat_name, []).append(item["line"])
-                    matched = True
-                    break
-            if not matched:
-                categories.setdefault("🍽️ Другое", []).append(item["line"])
-        # Возвращаем в порядке KITCHEN_CATEGORIES
-        result = []
-        for cat_name, _ in self.KITCHEN_CATEGORIES:
-            if cat_name in categories:
-                result.append((cat_name, categories[cat_name]))
-        if "🍽️ Другое" in categories:
-            result.append(("🍽️ Другое", categories["🍽️ Другое"]))
         return result
 
     async def get_stop_list_summary(self, extra_products: dict = None,
@@ -309,9 +275,9 @@ class IikoClient:
                 return "✅ Стоп-лист бара пуст — все позиции в наличии!"
             parts = []
             if stop:
-                parts.append(f"🔴 ПОЛНЫЙ СТОП ({len(stop)}):\n" + "\n".join(i["line"] for i in stop))
+                parts.append(f"🔴 ПОЛНЫЙ СТОП ({len(stop)}):\n" + "\n".join(stop))
             if limits:
-                parts.append(f"🟡 ОГРАНИЧЕНИЯ ({len(limits)}):\n" + "\n".join(i["line"] for i in limits))
+                parts.append(f"🟡 ОГРАНИЧЕНИЯ ({len(limits)}):\n" + "\n".join(limits))
             total = len(stop) + len(limits)
             return f"🍷 Стоп-лист БАРА ({total} позиций):\n\n" + "\n\n".join(parts)
 
@@ -322,15 +288,9 @@ class IikoClient:
                 return "✅ Стоп-лист кухни пуст — все позиции в наличии!"
             parts = []
             if stop:
-                parts.append("🔴 ПОЛНЫЙ СТОП:")
-                for cat_name, cat_items in self._group_kitchen_by_category(stop):
-                    parts.append(f"\n{cat_name} ({len(cat_items)}):")
-                    parts.append("\n".join(cat_items))
+                parts.append(f"🔴 ПОЛНЫЙ СТОП ({len(stop)}):\n" + "\n".join(stop))
             if limits:
-                parts.append("🟡 ОГРАНИЧЕНИЯ:")
-                for cat_name, cat_items in self._group_kitchen_by_category(limits):
-                    parts.append(f"\n{cat_name} ({len(cat_items)}):")
-                    parts.append("\n".join(cat_items))
+                parts.append(f"🟡 ОГРАНИЧЕНИЯ ({len(limits)}):\n" + "\n".join(limits))
             total = len(stop) + len(limits)
             return f"🍽️ Стоп-лист КУХНИ ({total} позиций):\n\n" + "\n\n".join(parts)
 
@@ -341,13 +301,9 @@ class IikoClient:
                 return "✅ Полный стоп пуст — нет позиций с нулевым остатком!"
             parts = []
             if kit_s:
-                parts.append("🍽️ КУХНЯ:")
-                for cat_name, cat_items in self._group_kitchen_by_category(kit_s):
-                    parts.append(f"\n{cat_name} ({len(cat_items)}):")
-                    parts.append("\n".join(cat_items))
+                parts.append(f"🍽️ КУХНЯ ({len(kit_s)}):\n" + "\n".join(kit_s))
             if bar_s:
-                parts.append(f"🍷 БАР ({len(bar_s)}):")
-                parts.append("\n".join(i["line"] for i in bar_s))
+                parts.append(f"🍷 БАР ({len(bar_s)}):\n" + "\n".join(bar_s))
             total = len(bar_s) + len(kit_s)
             return f"🔴 Полный СТОП ({total} позиций):\n\n" + "\n\n".join(parts)
 
@@ -358,13 +314,9 @@ class IikoClient:
                 return "✅ Ограничений нет — все позиции без лимитов!"
             parts = []
             if kit_l:
-                parts.append("🍽️ КУХНЯ:")
-                for cat_name, cat_items in self._group_kitchen_by_category(kit_l):
-                    parts.append(f"\n{cat_name} ({len(cat_items)}):")
-                    parts.append("\n".join(cat_items))
+                parts.append(f"🍽️ КУХНЯ ({len(kit_l)}):\n" + "\n".join(kit_l))
             if bar_l:
-                parts.append(f"🍷 БАР ({len(bar_l)}):")
-                parts.append("\n".join(i["line"] for i in bar_l))
+                parts.append(f"🍷 БАР ({len(bar_l)}):\n" + "\n".join(bar_l))
             total = len(bar_l) + len(kit_l)
             return f"🟡 ОГРАНИЧЕНИЯ ({total} позиций):\n\n" + "\n\n".join(parts)
 
@@ -375,19 +327,13 @@ class IikoClient:
                 return "✅ Стоп-лист пуст — все позиции в наличии!"
             parts = []
             if items["kitchen_stop"]:
-                parts.append("🍽️ КУХНЯ — стоп:")
-                for cat_name, cat_items in self._group_kitchen_by_category(items["kitchen_stop"]):
-                    parts.append(f"\n{cat_name} ({len(cat_items)}):")
-                    parts.append("\n".join(cat_items))
+                parts.append(f"🍽️ КУХНЯ — стоп ({len(items['kitchen_stop'])}):\n" + "\n".join(items["kitchen_stop"]))
             if items["kitchen_limits"]:
-                parts.append("🍽️ КУХНЯ — ограничения:")
-                for cat_name, cat_items in self._group_kitchen_by_category(items["kitchen_limits"]):
-                    parts.append(f"\n{cat_name} ({len(cat_items)}):")
-                    parts.append("\n".join(cat_items))
+                parts.append(f"🍽️ КУХНЯ — ограничения ({len(items['kitchen_limits'])}):\n" + "\n".join(items["kitchen_limits"]))
             if items["bar_stop"]:
-                parts.append(f"🍷 БАР — стоп ({len(items['bar_stop'])}):\n" + "\n".join(i["line"] for i in items["bar_stop"]))
+                parts.append(f"🍷 БАР — стоп ({len(items['bar_stop'])}):\n" + "\n".join(items["bar_stop"]))
             if items["bar_limits"]:
-                parts.append(f"🍷 БАР — ограничения ({len(items['bar_limits'])}):\n" + "\n".join(i["line"] for i in items["bar_limits"]))
+                parts.append(f"🍷 БАР — ограничения ({len(items['bar_limits'])}):\n" + "\n".join(items["bar_limits"]))
             total = len(all_stop) + len(all_limits)
             return f"🚫 Стоп-лист ({total} позиций):\n\n" + "\n\n".join(parts)
 
