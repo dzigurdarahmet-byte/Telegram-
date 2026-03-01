@@ -107,21 +107,23 @@ def _get_period_dates(period: str):
     return period, period, period
 
 
-async def get_combined_data(period: str) -> str:
-    """Собрать данные из ВСЕХ источников"""
-    date_from, date_to, label = _get_period_dates(period)
-    parts = []
-
-    # 1. Стоп-лист (облако + сервер для названий)
+async def get_stop_list_text() -> str:
+    """Получить полный стоп-лист (только стоп, без ограничений) по кухне и бару"""
     try:
         extra = {}
         if iiko_server:
             extra = await iiko_server.get_products()
-        parts.append(await iiko_cloud.get_stop_list_summary(extra_products=extra, view="stop"))
+        return await iiko_cloud.get_stop_list_summary(extra_products=extra, view="stop")
     except Exception as e:
-        parts.append(f"⚠️ Стоп-лист: {e}")
+        return f"⚠️ Стоп-лист: {e}"
 
-    # 2. Данные доставки — из OLAP iiko Server (по OrderServiceType)
+
+async def get_combined_data(period: str) -> str:
+    """Собрать данные из ВСЕХ источников (без стоп-листа — он отправляется отдельно)"""
+    date_from, date_to, label = _get_period_dates(period)
+    parts = []
+
+    # 1. Данные доставки — из OLAP iiko Server (по OrderServiceType)
     if iiko_server:
         try:
             delivery_data = await iiko_server.get_delivery_sales_summary(date_from, date_to)
@@ -317,8 +319,19 @@ async def _send_yoy_chart(update: Update, period: str):
 
 
 async def cmd_today(update, context):
+    if not check_access(update.effective_user.id):
+        return
+
+    # 1. Стоп-лист — отдельным сообщением, полный список, без Claude
+    try:
+        stop_text = await get_stop_list_text()
+        await update.message.reply_text(stop_text)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Стоп-лист: {e}")
+
+    # 2. Аналитика через Claude
     await cmd_period(update, context, "today",
-        "Полная сводка за сегодня: выручка по залу и доставке отдельно, средний чек, топ блюд, стоп-лист")
+        "Полная сводка за сегодня: выручка по залу и доставке отдельно, средний чек, топ блюд")
     await _send_yoy_chart(update, "today")
 
 async def cmd_yesterday(update, context):
