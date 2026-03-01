@@ -7,6 +7,7 @@ iiko Cloud API (iikoTransport) клиент — версия 3
 import httpx
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta
 from typing import Optional
 from collections import defaultdict
@@ -203,7 +204,9 @@ class IikoClient:
             return True
         if any(kw in g for kw in self.BAR_KEYWORDS):
             return True
-        return any(kw in n for kw in self.BAR_KEYWORDS)
+        # Название: пословный поиск (чтобы "барбекю" не ловило "бар", "свиной" не ловило "вин")
+        words = re.split(r'[\s\-/,.()+]+', n)
+        return any(w in self.BAR_KEYWORDS for w in words)
 
     async def _get_stop_list_items(self, extra_products: dict = None) -> dict:
         """Получить все позиции стоп-листа, разделённые по категориям.
