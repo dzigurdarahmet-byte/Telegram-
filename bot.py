@@ -248,7 +248,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /stop\\_bar — стоп-лист бара\n"
         "  /stop\\_kitchen — стоп-лист кухни\n"
         "  /stop\\_limits — только ограничения\n"
-        "  /menu — информация по меню\n\n"
+        "  /menu — полное меню\n"
+        "  /menu\\_bar — меню бара\n"
+        "  /menu\\_kitchen — меню кухни\n\n"
         "👨‍🍳 *Сотрудники и кухня*\n"
         "  /staff — отчёт по сотрудникам\n"
         "  /cooks — производительность поваров\n"
@@ -383,15 +385,51 @@ async def cmd_stop_limits(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _stop_handler(update, context, "limits", "ограничения")
 
 
-async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _send_long_text(msg, text: str, update: Update):
+    """Разбить длинный текст на части и отправить в Telegram"""
+    MAX = 4096
+    if len(text) <= MAX:
+        await msg.edit_text(text)
+        return
+    parts = []
+    while text:
+        if len(text) <= MAX:
+            parts.append(text)
+            break
+        cut = text.rfind("\n", 0, MAX)
+        if cut <= 0:
+            cut = MAX
+        parts.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    for i, part in enumerate(parts):
+        if i == 0:
+            await msg.edit_text(part)
+        else:
+            await update.message.reply_text(part)
+
+
+async def _menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                        view: str, label: str):
     if not check_access(update.effective_user.id):
         return
-    msg = await update.message.reply_text("⏳ Загружаю меню...")
+    msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
     try:
-        data = await iiko_cloud.get_menu_summary()
-        await msg.edit_text(data[:4000])
+        data = await iiko_cloud.get_menu_summary(view)
+        await _send_long_text(msg, data, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _menu_handler(update, context, "full", "меню")
+
+
+async def cmd_menu_bar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _menu_handler(update, context, "bar", "меню бара")
+
+
+async def cmd_menu_kitchen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _menu_handler(update, context, "kitchen", "меню кухни")
 
 
 async def cmd_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -782,7 +820,9 @@ async def post_init(application: Application):
         BotCommand("stop_bar", "Стоп-лист бара"),
         BotCommand("stop_kitchen", "Стоп-лист кухни"),
         BotCommand("stop_limits", "Ограничения"),
-        BotCommand("menu", "Меню"),
+        BotCommand("menu", "Полное меню"),
+        BotCommand("menu_bar", "Меню бара"),
+        BotCommand("menu_kitchen", "Меню кухни"),
         BotCommand("staff", "Сотрудники"),
         BotCommand("cooks", "Производительность поваров"),
         BotCommand("setsheet", "Привязать таблицу зарплат"),
@@ -809,6 +849,8 @@ def main():
     app.add_handler(CommandHandler("stop_kitchen", cmd_stop_kitchen))
     app.add_handler(CommandHandler("stop_limits", cmd_stop_limits))
     app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CommandHandler("menu_bar", cmd_menu_bar))
+    app.add_handler(CommandHandler("menu_kitchen", cmd_menu_kitchen))
     app.add_handler(CommandHandler("staff", cmd_staff))
     app.add_handler(CommandHandler("abc", cmd_abc))
     app.add_handler(CommandHandler("diag", cmd_diag))

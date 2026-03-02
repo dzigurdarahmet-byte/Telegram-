@@ -145,25 +145,51 @@ class IikoClient:
                 }
         return result
 
-    async def get_menu_summary(self) -> str:
+    async def get_menu_summary(self, view: str = "full") -> str:
+        """Меню, сгруппированное по разделам iiko.
+
+        view: "full" — все позиции, "bar" — только бар, "kitchen" — только кухня.
+        """
         data = await self.get_nomenclature()
         products = data.get("products", [])
         groups = data.get("groups", [])
         group_map = {g["id"]: g.get("name", "Без группы") for g in groups}
-        menu_items = []
+
+        grouped: dict[str, list[str]] = defaultdict(list)
+        total = 0
+
         for p in products:
-            if p.get("type") == "Dish":
-                price = ""
-                sizes = p.get("sizePrices", [])
-                if sizes and sizes[0].get("price"):
-                    price = f" — {sizes[0]['price'].get('currentPrice', '?')} руб."
-                group_name = group_map.get(p.get("parentGroup"), "Другое")
-                menu_items.append(f"  • {p.get('name', '?')}{price} [{group_name}]")
-        return (
-            f"📋 Меню: {len(menu_items)} позиций в {len(groups)} группах\n"
-            + "\n".join(menu_items[:100])
-            + ("\n  ... (ещё позиции)" if len(menu_items) > 100 else "")
-        )
+            if p.get("type") != "Dish":
+                continue
+            name = p.get("name", "?")
+            group_name = group_map.get(p.get("parentGroup"), "Другое")
+            is_bar = self._is_bar_item(name, group_name)
+
+            if view == "bar" and not is_bar:
+                continue
+            if view == "kitchen" and is_bar:
+                continue
+
+            price = ""
+            sizes = p.get("sizePrices", [])
+            if sizes and sizes[0].get("price"):
+                price = f" — {sizes[0]['price'].get('currentPrice', '?')} руб."
+            grouped[group_name].append(f"  • {name}{price}")
+            total += 1
+
+        if not grouped:
+            labels = {"full": "Меню", "bar": "Меню бара", "kitchen": "Меню кухни"}
+            return f"📋 {labels.get(view, 'Меню')}: позиций не найдено"
+
+        labels = {"full": "Меню", "bar": "Меню бара", "kitchen": "Меню кухни"}
+        lines = [f"📋 {labels.get(view, 'Меню')}: {total} позиций\n"]
+        for gname in sorted(grouped.keys()):
+            items = grouped[gname]
+            lines.append(f"📂 {gname} ({len(items)}):")
+            lines.extend(items)
+            lines.append("")
+
+        return "\n".join(lines)
 
     # ─── Стоп-лист ─────────────────────────────────────────
 
