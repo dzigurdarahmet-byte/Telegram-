@@ -5,14 +5,16 @@ Telegram-бот для аналитики ресторана
 
 import asyncio
 import calendar
+import json
+import os
 import re
 import logging
 from datetime import datetime, timedelta
 
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    CallbackQueryHandler, filters, ContextTypes
 )
 
 from iiko_client import IikoClient
@@ -20,7 +22,7 @@ from iiko_server_client import IikoServerClient
 from claude_analytics import ClaudeAnalytics
 from config import (
     TELEGRAM_BOT_TOKEN, IIKO_API_LOGIN, ANTHROPIC_API_KEY,
-    ALLOWED_USERS, ADMIN_CHAT_ID,
+    ALLOWED_USERS, ADMIN_USERS, ADMIN_CHAT_ID,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
     GOOGLE_SHEET_ID,
@@ -86,10 +88,45 @@ def _extract_sheet_id(text: str) -> str:
 EXCLUDED_STAFF = ["Стаховский Сергей", "denvic"]
 
 
+# ─── Система регистрации пользователей ────────────────────
+
+APPROVED_USERS_FILE = os.path.join(os.path.dirname(__file__) or ".", "approved_users.json")
+
+
+def _load_approved_users() -> dict:
+    """Загрузить одобренных пользователей из файла.
+    Формат: {user_id_str: {"username": ..., "approved_at": ...}}
+    """
+    if os.path.exists(APPROVED_USERS_FILE):
+        try:
+            with open(APPROVED_USERS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_approved_users(data: dict):
+    """Сохранить одобренных пользователей в файл"""
+    with open(APPROVED_USERS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _is_admin(user_id: int) -> bool:
+    """Проверить, является ли пользователь админом"""
+    return user_id in ADMIN_USERS
+
+
 def check_access(user_id: int) -> bool:
-    if not ALLOWED_USERS:
+    """Проверить доступ: админы + одобренные пользователи.
+    Если ADMIN_USERS пуст — доступ открыт всем (обратная совместимость).
+    """
+    if not ADMIN_USERS:
         return True
-    return user_id in ALLOWED_USERS
+    if user_id in ADMIN_USERS:
+        return True
+    approved = _load_approved_users()
+    return str(user_id) in approved
 
 
 def _get_period_dates(period: str):
@@ -255,11 +292,29 @@ async def get_yoy_totals(period: str) -> tuple:
 # ─── Команды ───────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not check_access(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет доступа к этому боту.")
+    user_id = update.effective_user.id
+
+    # Новый пользователь без доступа — показываем приветствие с кнопкой
+    if not check_access(user_id):
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔑 Запросить доступ", callback_data="request_access")]
+        ])
+        await update.message.reply_text(
+            "👋 Привет! Я AI-аналитик ресторана.\n\n"
+            "У вас пока нет доступа к боту.\n"
+            "Нажмите кнопку ниже, чтобы отправить запрос администратору.",
+            reply_markup=keyboard
+        )
         return
 
     server_status = "🟢 подключён" if iiko_server else "⚪ не настроен"
+    admin_section = ""
+    if _is_admin(user_id):
+        admin_section = (
+            "\n👑 *Администрирование*\n"
+            "  /users — список пользователей\n"
+            "  /revoke ID — забрать доступ\n"
+        )
     await update.message.reply_text(
         "👋 Привет! Я AI-аналитик вашего ресторана.\n\n"
         f"📡 Облако iiko: 🟢 подключён\n"
@@ -284,7 +339,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /sheet — текущая таблица\n"
         "  /abc — ABC-анализ блюд\n\n"
         "🔧 *Сервис*\n"
-        "  /diag — диагностика подключений\n\n"
+        "  /diag — диагностика подключений\n"
+        f"{admin_section}\n"
         "🤖 Или просто напишите вопрос!",
         parse_mode="Markdown"
     )
@@ -706,6 +762,179 @@ async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+# ─── Регистрация пользователей ────────────────────────────
+
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик всех inline-кнопок"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "request_access":
+        await _handle_request_access(query, context)
+    elif data.startswith("approve_"):
+        await _handle_approve(query, data, context)
+    elif data.startswith("reject_"):
+        await _handle_reject(query, data, context)
+
+
+async def _handle_request_access(query, context: ContextTypes.DEFAULT_TYPE):
+    """Пользователь нажал 'Запросить доступ'"""
+    user = query.from_user
+    user_id = user.id
+    username = user.username or ""
+    full_name = user.full_name or ""
+
+    # Проверяем, может уже есть доступ
+    if check_access(user_id):
+        await query.edit_message_text("✅ У вас уже есть доступ! Нажмите /start")
+        return
+
+    await query.edit_message_text(
+        "✅ Запрос отправлен администратору.\n"
+        "Ожидайте подтверждения — вам придёт уведомление."
+    )
+
+    # Отправляем запрос всем админам
+    display = f"@{username}" if username else full_name
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Одобрить", callback_data=f"approve_{user_id}"),
+            InlineKeyboardButton("❌ Отклонить", callback_data=f"reject_{user_id}"),
+        ]
+    ])
+    admin_text = (
+        f"🔔 *Запрос доступа*\n\n"
+        f"Пользователь: {display}\n"
+        f"Имя: {full_name}\n"
+        f"ID: `{user_id}`"
+    )
+
+    for admin_id in ADMIN_USERS:
+        try:
+            await context.bot.send_message(
+                admin_id, admin_text,
+                reply_markup=keyboard, parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить запрос админу {admin_id}: {e}")
+
+
+async def _handle_approve(query, data: str, context: ContextTypes.DEFAULT_TYPE):
+    """Админ нажал 'Одобрить'"""
+    admin_id = query.from_user.id
+    if not _is_admin(admin_id):
+        await query.edit_message_text("⛔ Только админы могут одобрять доступ.")
+        return
+
+    user_id_str = data.replace("approve_", "")
+    user_id = int(user_id_str)
+
+    # Сохраняем в файл
+    approved = _load_approved_users()
+    approved[user_id_str] = {
+        "approved_by": admin_id,
+        "approved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    _save_approved_users(approved)
+
+    await query.edit_message_text(
+        f"✅ Пользователь ID `{user_id}` одобрен.",
+        parse_mode="Markdown"
+    )
+
+    # Уведомляем пользователя
+    try:
+        await context.bot.send_message(
+            user_id,
+            "🎉 Доступ открыт! Нажмите /start чтобы начать."
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+
+
+async def _handle_reject(query, data: str, context: ContextTypes.DEFAULT_TYPE):
+    """Админ нажал 'Отклонить'"""
+    admin_id = query.from_user.id
+    if not _is_admin(admin_id):
+        await query.edit_message_text("⛔ Только админы могут отклонять доступ.")
+        return
+
+    user_id_str = data.replace("reject_", "")
+    user_id = int(user_id_str)
+
+    await query.edit_message_text(
+        f"❌ Пользователь ID `{user_id}` отклонён.",
+        parse_mode="Markdown"
+    )
+
+    # Уведомляем пользователя
+    try:
+        await context.bot.send_message(
+            user_id,
+            "❌ Доступ отклонён. Обратитесь к администратору."
+        )
+    except Exception as e:
+        logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+
+
+async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Список всех одобренных пользователей (только для админов)"""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Только для администраторов.")
+        return
+
+    approved = _load_approved_users()
+
+    lines = ["👑 *Админы:*"]
+    for uid in ADMIN_USERS:
+        lines.append(f"  `{uid}`")
+
+    if approved:
+        lines.append(f"\n👥 *Одобренные пользователи ({len(approved)}):*")
+        for uid_str, info in approved.items():
+            approved_at = info.get("approved_at", "?")
+            lines.append(f"  `{uid_str}` — одобрен {approved_at}")
+    else:
+        lines.append("\n👥 Одобренных пользователей нет.")
+
+    lines.append("\nЗабрать доступ: /revoke <ID>")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Забрать доступ у пользователя: /revoke <ID>"""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Только для администраторов.")
+        return
+
+    if not context.args:
+        await update.message.reply_text("Использование: /revoke <user\\_id>", parse_mode="Markdown")
+        return
+
+    user_id_str = context.args[0].strip()
+    approved = _load_approved_users()
+
+    if user_id_str not in approved:
+        await update.message.reply_text(f"Пользователь `{user_id_str}` не найден в списке.", parse_mode="Markdown")
+        return
+
+    del approved[user_id_str]
+    _save_approved_users(approved)
+
+    await update.message.reply_text(f"✅ Доступ пользователя `{user_id_str}` отозван.", parse_mode="Markdown")
+
+    # Уведомляем пользователя
+    try:
+        await context.bot.send_message(
+            int(user_id_str),
+            "⛔ Ваш доступ к боту был отозван администратором."
+        )
+    except Exception:
+        pass
+
+
 async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Самопроверка кода: Junior → Middle → Senior"""
     if not check_access(update.effective_user.id):
@@ -950,7 +1179,13 @@ def _detect_period(question: str) -> str:
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
-        await update.message.reply_text("⛔ У вас нет доступа.")
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔑 Запросить доступ", callback_data="request_access")]
+        ])
+        await update.message.reply_text(
+            "⛔ У вас нет доступа. Нажмите кнопку ниже или /start",
+            reply_markup=keyboard
+        )
         return
 
     question = update.message.text
@@ -1036,6 +1271,8 @@ async def post_init(application: Application):
         BotCommand("abc", "ABC-анализ"),
         BotCommand("diag", "Диагностика"),
         BotCommand("selfcheck", "Самопроверка кода"),
+        BotCommand("users", "Список пользователей (админ)"),
+        BotCommand("revoke", "Забрать доступ (админ)"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -1070,6 +1307,9 @@ def main():
     app.add_handler(CommandHandler("debugcooks", cmd_debugcooks))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(CommandHandler("selfcheck", cmd_selfcheck))
+    app.add_handler(CommandHandler("users", cmd_users))
+    app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

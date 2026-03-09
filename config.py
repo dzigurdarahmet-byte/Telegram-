@@ -24,6 +24,9 @@ IIKO_SERVER_PASSWORD = os.getenv("IIKO_SERVER_PASSWORD", "")
 _allowed = os.getenv("ALLOWED_USERS", "")
 ALLOWED_USERS = [int(x.strip()) for x in _allowed.split(",") if x.strip()] if _allowed else []
 
+# Админы — те же ALLOWED_USERS, имеют полный доступ сразу и управляют регистрацией
+ADMIN_USERS = list(ALLOWED_USERS)
+
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 if ADMIN_CHAT_ID:
     ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)
