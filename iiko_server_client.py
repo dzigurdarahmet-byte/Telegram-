@@ -1140,6 +1140,53 @@ class IikoServerClient:
 
         return "\n".join(lines)
 
+    # ─── Исторические данные для прогнозирования ─────────────────────────
+
+    async def get_historical_data(self, weeks_back: int = 8) -> dict:
+        """
+        Получить исторические данные за последние N недель.
+        Два запроса: по дням и по часам.
+        Возвращает dict с day_rows и hour_rows.
+        """
+        today = datetime.now()
+        date_to = today.strftime("%Y-%m-%d")
+        date_from = (today - timedelta(weeks=weeks_back)).strftime("%Y-%m-%d")
+
+        result = {}
+
+        try:
+            # Запрос 1: по дням
+            result["day_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["OpenDate.Typed"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt", "UniqOrderId.OrdersCount"]
+            )
+            logger.info(f"История по дням: {len(result['day_rows'])} строк "
+                        f"({date_from} — {date_to})")
+        except Exception as e:
+            logger.error(f"Ошибка получения истории по дням: {e}")
+            result["day_rows"] = []
+
+        try:
+            # Запрос 2: по часам (агрегат за весь период)
+            result["hour_rows"] = await self._olap_request(
+                date_from, date_to,
+                group_fields=["HourOpen"],
+                aggregate_fields=["DishDiscountSumInt", "DishSumInt",
+                                  "DishAmountInt", "UniqOrderId.OrdersCount"]
+            )
+            logger.info(f"История по часам: {len(result['hour_rows'])} строк")
+        except Exception as e:
+            logger.error(f"Ошибка получения истории по часам: {e}")
+            result["hour_rows"] = []
+
+        result["date_from"] = date_from
+        result["date_to"] = date_to
+        result["weeks_back"] = weeks_back
+
+        return result
+
     async def test_connection(self) -> str:
         """Тест подключения"""
         try:

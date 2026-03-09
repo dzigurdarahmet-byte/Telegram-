@@ -31,6 +31,7 @@ from config import (
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
 from yandex_eda_client import YandexEdaClient
+from forecast import LoadForecaster
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -65,6 +66,9 @@ if YANDEX_EDA_CLIENT_ID and YANDEX_EDA_CLIENT_SECRET:
     logger.info("Яндекс Еда Вендор: подключён")
 else:
     logger.info("Яндекс Еда Вендор: не настроен")
+
+# Прогнозирование
+forecaster = LoadForecaster()
 
 
 # ─── Google Sheets ────────────────────────────────────────
@@ -338,6 +342,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /setsheet — привязать таблицу зарплат\n"
         "  /sheet — текущая таблица\n"
         "  /abc — ABC-анализ блюд\n\n"
+        "🔮 *Прогноз*\n"
+        "  /forecast — прогноз на сегодня/завтра\n"
+        "  /forecast\\_week — прогноз на неделю\n"
+        "  /staff\\_plan — план персонала\n\n"
         "🔧 *Сервис*\n"
         "  /diag — диагностика подключений\n"
         f"{admin_section}\n"
@@ -758,6 +766,118 @@ async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         raw = await iiko_cloud.get_stop_list_debug()
         await msg.edit_text(f"📋 Отладка стоп-листа:\n\n{raw[:3900]}")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+# ─── Прогнозирование ──────────────────────────────────────
+
+async def _ensure_forecast_data() -> dict:
+    """Загрузить или обновить исторические данные для прогноза"""
+    history = forecaster.load_history()
+    if history.get("day_rows"):
+        return history
+
+    if not iiko_server:
+        return {"error": "Локальный сервер не настроен"}
+
+    history = await iiko_server.get_historical_data(weeks_back=8)
+    if history.get("day_rows"):
+        forecaster.save_history(history)
+    return history
+
+
+async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Прогноз на сегодня и завтра"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔮 Загружаю прогноз...")
+    try:
+        history = await _ensure_forecast_data()
+        if "error" in history:
+            await msg.edit_text(f"⚠️ {history['error']}")
+            return
+
+        patterns = forecaster.analyze_patterns(history)
+        if "error" in patterns:
+            await msg.edit_text(f"⚠️ {patterns['error']}")
+            return
+
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+
+        parts = []
+        for target in [today, tomorrow]:
+            fc = forecaster.forecast_day(target, patterns)
+            staff = forecaster.recommend_staff(fc, patterns.get("hour_distribution"))
+            parts.append(forecaster.format_forecast(fc, staff))
+
+        text = "\n\n" + ("═" * 35) + "\n\n"
+        await _safe_send(msg, text.join(parts), update)
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_forecast_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Прогноз на неделю вперёд"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔮 Строю прогноз на неделю...")
+    try:
+        history = await _ensure_forecast_data()
+        if "error" in history:
+            await msg.edit_text(f"⚠️ {history['error']}")
+            return
+
+        patterns = forecaster.analyze_patterns(history)
+        if "error" in patterns:
+            await msg.edit_text(f"⚠️ {patterns['error']}")
+            return
+
+        today = datetime.now().date()
+        forecasts = []
+        staffs = []
+        for i in range(7):
+            target = today + timedelta(days=i)
+            fc = forecaster.forecast_day(target, patterns)
+            st = forecaster.recommend_staff(fc, patterns.get("hour_distribution"))
+            forecasts.append(fc)
+            staffs.append(st)
+
+        text = forecaster.format_week_forecast(forecasts, staffs)
+        await _safe_send(msg, text, update)
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_staff_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """План персонала на неделю"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("👥 Строю план персонала...")
+    try:
+        history = await _ensure_forecast_data()
+        if "error" in history:
+            await msg.edit_text(f"⚠️ {history['error']}")
+            return
+
+        patterns = forecaster.analyze_patterns(history)
+        if "error" in patterns:
+            await msg.edit_text(f"⚠️ {patterns['error']}")
+            return
+
+        today = datetime.now().date()
+        forecasts = []
+        staffs = []
+        for i in range(7):
+            target = today + timedelta(days=i)
+            fc = forecaster.forecast_day(target, patterns)
+            st = forecaster.recommend_staff(fc, patterns.get("hour_distribution"))
+            forecasts.append(fc)
+            staffs.append(st)
+
+        text = forecaster.format_staff_plan(forecasts, staffs)
+        await _safe_send(msg, text, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -1202,17 +1322,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    msg = await update.message.reply_text("🤔 Анализирую...")
+    # Определяем, спрашивают ли про прогноз/планирование
+    q_lower = question.lower()
+    forecast_keywords = [
+        "прогноз", "forecast", "ожидать", "планир", "смен",
+        "сколько официант", "сколько повар", "нужно персонал",
+        "сколько нужно", "план персонал", "staff_plan",
+    ]
+    is_forecast_query = any(kw in q_lower for kw in forecast_keywords)
+
+    msg = await update.message.reply_text(
+        "🔮 Строю прогноз..." if is_forecast_query else "🤔 Анализирую..."
+    )
     try:
-        # Сначала пробуем извлечь точные даты из вопроса
-        date_range = _parse_date_range(question)
-        if date_range:
-            date_from, date_to, label = date_range
-            logger.info(f"Распознан период: {date_from} — {date_to} ({label})")
-            data = await get_combined_data_by_dates(date_from, date_to, label)
-        else:
+        # Прогнозные запросы — подмешиваем данные прогноза
+        if is_forecast_query and iiko_server:
+            history = await _ensure_forecast_data()
+            forecast_text = ""
+            if history.get("day_rows"):
+                patterns = forecaster.analyze_patterns(history)
+                if "error" not in patterns:
+                    today = datetime.now().date()
+                    tomorrow = today + timedelta(days=1)
+                    parts_fc = []
+                    for target in [today, tomorrow]:
+                        fc = forecaster.forecast_day(target, patterns)
+                        st = forecaster.recommend_staff(
+                            fc, patterns.get("hour_distribution")
+                        )
+                        parts_fc.append(forecaster.format_forecast(fc, st))
+                    forecast_text = "\n\n".join(parts_fc)
+
+            # Также берём текущие данные для контекста
             period = _detect_period(question)
             data = await get_combined_data(period)
+            if forecast_text:
+                data = f"═══ ПРОГНОЗ ═══\n{forecast_text}\n\n═══ ТЕКУЩИЕ ДАННЫЕ ═══\n{data}"
+        else:
+            # Обычный запрос — без прогноза
+            date_range = _parse_date_range(question)
+            if date_range:
+                date_from, date_to, label = date_range
+                logger.info(f"Распознан период: {date_from} — {date_to} ({label})")
+                data = await get_combined_data_by_dates(date_from, date_to, label)
+            else:
+                period = _detect_period(question)
+                data = await get_combined_data(period)
+
         data = "\n".join(
             line for line in data.split("\n")
             if not any(name in line for name in EXCLUDED_STAFF)
@@ -1230,9 +1386,27 @@ async def send_morning_report(context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         data = await get_combined_data("yesterday")
+
+        # Добавляем прогноз на сегодня
+        forecast_block = ""
+        try:
+            history = await _ensure_forecast_data()
+            if history.get("day_rows"):
+                patterns = forecaster.analyze_patterns(history)
+                if "error" not in patterns:
+                    today = datetime.now().date()
+                    fc = forecaster.forecast_day(today, patterns)
+                    st = forecaster.recommend_staff(
+                        fc, patterns.get("hour_distribution")
+                    )
+                    forecast_block = "\n\n" + forecaster.format_forecast(fc, st)
+        except Exception as e:
+            logger.warning(f"Прогноз для утреннего отчёта: {e}")
+
         analysis = claude.analyze(
-            "Утренний брифинг: итоги вчера (зал + доставка), стоп-лист, на что обратить внимание",
-            data
+            "Утренний брифинг: итоги вчера (зал + доставка), стоп-лист, на что обратить внимание. "
+            "Также есть прогноз на сегодня — включи его в отчёт.",
+            data + forecast_block
         )
         await context.bot.send_message(ADMIN_CHAT_ID, f"☀️ *Утренний отчёт*\n\n{analysis}", parse_mode="Markdown")
     except Exception as e:
@@ -1271,6 +1445,9 @@ async def post_init(application: Application):
         BotCommand("abc", "ABC-анализ"),
         BotCommand("diag", "Диагностика"),
         BotCommand("selfcheck", "Самопроверка кода"),
+        BotCommand("forecast", "Прогноз на сегодня/завтра"),
+        BotCommand("forecast_week", "Прогноз на неделю"),
+        BotCommand("staff_plan", "План персонала на неделю"),
         BotCommand("users", "Список пользователей (админ)"),
         BotCommand("revoke", "Забрать доступ (админ)"),
     ])
@@ -1307,6 +1484,9 @@ def main():
     app.add_handler(CommandHandler("debugcooks", cmd_debugcooks))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
     app.add_handler(CommandHandler("selfcheck", cmd_selfcheck))
+    app.add_handler(CommandHandler("forecast", cmd_forecast))
+    app.add_handler(CommandHandler("forecast_week", cmd_forecast_week))
+    app.add_handler(CommandHandler("staff_plan", cmd_staff_plan))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CallbackQueryHandler(callback_handler))
