@@ -41,6 +41,38 @@ WEEKDAY_NAMES_RU = [
     "Пятница", "Суббота", "Воскресенье"
 ]
 
+# Переносы выходных / праздничные дни 2026 (все даты, когда люди отдыхают)
+# Источник: Постановление Правительства РФ о переносе выходных дней
+HOLIDAYS_2026 = {
+    # Новогодние каникулы
+    date(2026, 1, 1), date(2026, 1, 2), date(2026, 1, 3), date(2026, 1, 4),
+    date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7), date(2026, 1, 8),
+    # 23 февраля (пн)
+    date(2026, 2, 23),
+    # 8 марта (вс) + перенос на пн 9 марта
+    date(2026, 3, 8), date(2026, 3, 9),
+    # Майские: 1 мая (пт), 2-3 — выходные; 9 мая (сб), 11 мая (пн — перенос)
+    date(2026, 5, 1), date(2026, 5, 2), date(2026, 5, 3),
+    date(2026, 5, 9), date(2026, 5, 10), date(2026, 5, 11),
+    # День России 12 июня (пт)
+    date(2026, 6, 12),
+    # День народного единства 4 ноября (ср)
+    date(2026, 11, 4),
+    # Новогодние 31 декабря (чт)
+    date(2026, 12, 31),
+}
+
+
+def _is_day_off(d: date) -> bool:
+    """Проверить, является ли дата выходным/праздничным днём.
+    1. Если дата в HOLIDAYS_2026 — выходной
+    2. Если суббота или воскресенье — выходной
+    3. Иначе — будни
+    """
+    if d in HOLIDAYS_2026:
+        return True
+    return d.weekday() >= 5  # 5=сб, 6=вс
+
 
 def _get_holiday(d: date) -> Optional[tuple]:
     """Вернуть (название, коэффициент) если дата — праздник, иначе None"""
@@ -261,6 +293,14 @@ class LoadForecaster:
             predicted_revenue *= (1 + holiday_boost)
             predicted_orders *= (1 + holiday_boost)
             predicted_dishes *= (1 + holiday_boost)
+        elif target_date in HOLIDAYS_2026:
+            # Перенесённый выходной (напр. 9 марта за 8 марта) —
+            # применяем умеренный праздничный коэффициент
+            holiday_name = "Перенесённый выходной"
+            holiday_boost = 0.20
+            predicted_revenue *= (1 + holiday_boost)
+            predicted_orders *= (1 + holiday_boost)
+            predicted_dishes *= (1 + holiday_boost)
 
         # Доверительный интервал
         if min_revenue > 0 and max_revenue > 0:
@@ -315,7 +355,15 @@ class LoadForecaster:
             return {"error": forecast["error"]}
 
         wd = forecast.get("weekday", 0)
+        # Определяем выходной: пт-вс ИЛИ дата в HOLIDAYS_2026
+        forecast_date = None
+        try:
+            forecast_date = date.fromisoformat(forecast.get("date", ""))
+        except (ValueError, TypeError):
+            pass
         is_weekend = wd >= 4  # пт=4, сб=5, вс=6
+        if forecast_date and _is_day_off(forecast_date):
+            is_weekend = True
 
         # Определяем, нужно ли усиление
         is_high_load = False
