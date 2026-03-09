@@ -27,6 +27,10 @@ ALLOWED_USERS = [int(x.strip()) for x in _allowed.split(",") if x.strip()] if _a
 # Админы — те же ALLOWED_USERS, имеют полный доступ сразу и управляют регистрацией
 ADMIN_USERS = list(ALLOWED_USERS)
 
+# Одобренные пользователи (из переменной окружения, переживают перезапуск контейнера)
+_approved = os.getenv("APPROVED_USERS", "611739349")
+APPROVED_USERS = [int(x.strip()) for x in _approved.split(",") if x.strip()] if _approved else []
+
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
 if ADMIN_CHAT_ID:
     ADMIN_CHAT_ID = int(ADMIN_CHAT_ID)

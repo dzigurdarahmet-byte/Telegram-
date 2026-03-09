@@ -22,7 +22,7 @@ from iiko_server_client import IikoServerClient
 from claude_analytics import ClaudeAnalytics
 from config import (
     TELEGRAM_BOT_TOKEN, IIKO_API_LOGIN, ANTHROPIC_API_KEY,
-    ALLOWED_USERS, ADMIN_USERS, ADMIN_CHAT_ID,
+    ALLOWED_USERS, ADMIN_USERS, ADMIN_CHAT_ID, APPROVED_USERS,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
     GOOGLE_SHEET_ID,
@@ -118,26 +118,10 @@ def _extract_dish_names(data_text: str) -> list:
 
 # ─── Система регистрации пользователей ────────────────────
 
-APPROVED_USERS_FILE = os.path.join(os.path.dirname(__file__) or ".", "approved_users.json")
-
-
-def _load_approved_users() -> dict:
-    """Загрузить одобренных пользователей из файла.
-    Формат: {user_id_str: {"username": ..., "approved_at": ...}}
-    """
-    if os.path.exists(APPROVED_USERS_FILE):
-        try:
-            with open(APPROVED_USERS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
-
-
-def _save_approved_users(data: dict):
-    """Сохранить одобренных пользователей в файл"""
-    with open(APPROVED_USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# В памяти: пользователи из env (APPROVED_USERS) + одобренные в текущей сессии
+# env-пользователи переживают перезапуск, сессионные — нет (админ получит напоминание)
+_approved_from_env: set = set(APPROVED_USERS)  # загружены из переменной окружения
+_approved_session: dict = {}  # одобренные в этой сессии: {user_id: {"approved_at": ...}}
 
 
 def _is_admin(user_id: int) -> bool:
@@ -146,15 +130,18 @@ def _is_admin(user_id: int) -> bool:
 
 
 def check_access(user_id: int) -> bool:
-    """Проверить доступ: админы + одобренные пользователи.
+    """Проверить доступ: админы + одобренные (env + сессия).
     Если ADMIN_USERS пуст — доступ открыт всем (обратная совместимость).
     """
     if not ADMIN_USERS:
         return True
     if user_id in ADMIN_USERS:
         return True
-    approved = _load_approved_users()
-    return str(user_id) in approved
+    if user_id in _approved_from_env:
+        return True
+    if user_id in _approved_session:
+        return True
+    return False
 
 
 def _get_period_dates(period: str):
@@ -975,16 +962,21 @@ async def _handle_approve(query, data: str, context: ContextTypes.DEFAULT_TYPE):
     user_id_str = data.replace("approve_", "")
     user_id = int(user_id_str)
 
-    # Сохраняем в файл
-    approved = _load_approved_users()
-    approved[user_id_str] = {
+    # Сохраняем в память сессии
+    _approved_session[user_id] = {
         "approved_by": admin_id,
         "approved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    _save_approved_users(approved)
+
+    # Текущее значение для env
+    all_approved_ids = sorted(_approved_from_env | set(_approved_session.keys()))
+    env_value = ",".join(str(uid) for uid in all_approved_ids)
 
     await query.edit_message_text(
-        f"✅ Пользователь ID `{user_id}` одобрен.",
+        f"✅ Пользователь ID `{user_id}` одобрен.\n\n"
+        f"Для сохранения после перезапуска добавьте ID в "
+        f"Railway Variables APPROVED\\_USERS\n\n"
+        f"Текущее значение:\n`APPROVED_USERS={env_value}`",
         parse_mode="Markdown"
     )
 
@@ -1024,24 +1016,39 @@ async def _handle_reject(query, data: str, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Список всех одобренных пользователей (только для админов)"""
+    """Список всех пользователей с доступом (только для админов)"""
     if not _is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ Только для администраторов.")
         return
 
-    approved = _load_approved_users()
-
-    lines = ["👑 *Админы:*"]
+    lines = ["👑 *Админы (ALLOWED\\_USERS):*"]
     for uid in ADMIN_USERS:
-        lines.append(f"  `{uid}`")
+        lines.append(f"  `{uid}` — админ")
 
-    if approved:
-        lines.append(f"\n👥 *Одобренные пользователи ({len(approved)}):*")
-        for uid_str, info in approved.items():
+    # Пользователи из env (переживают перезапуск)
+    env_only = _approved_from_env - set(ADMIN_USERS)
+    if env_only:
+        lines.append(f"\n👥 *Одобренные (APPROVED\\_USERS, {len(env_only)}):*")
+        for uid in sorted(env_only):
+            lines.append(f"  `{uid}` — доступ")
+
+    # Пользователи из сессии (не в env — потеряются при перезапуске)
+    session_only = {uid for uid in _approved_session if uid not in _approved_from_env}
+    if session_only:
+        lines.append(f"\n⚠️ *Временные (не сохранены, {len(session_only)}):*")
+        for uid in sorted(session_only):
+            info = _approved_session[uid]
             approved_at = info.get("approved_at", "?")
-            lines.append(f"  `{uid_str}` — одобрен {approved_at}")
-    else:
+            lines.append(f"  `{uid}` — одобрен {approved_at}")
+
+    if not env_only and not session_only:
         lines.append("\n👥 Одобренных пользователей нет.")
+
+    # Подсказка с текущим значением env
+    all_ids = sorted(_approved_from_env | set(_approved_session.keys()))
+    if all_ids:
+        env_value = ",".join(str(uid) for uid in all_ids)
+        lines.append(f"\n`APPROVED_USERS={env_value}`")
 
     lines.append("\nЗабрать доступ: /revoke <ID>")
 
@@ -1059,21 +1066,40 @@ async def cmd_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id_str = context.args[0].strip()
-    approved = _load_approved_users()
+    try:
+        user_id = int(user_id_str)
+    except ValueError:
+        await update.message.reply_text("ID должен быть числом.")
+        return
 
-    if user_id_str not in approved:
+    # Удаляем из памяти
+    removed = False
+    if user_id in _approved_session:
+        del _approved_session[user_id]
+        removed = True
+    if user_id in _approved_from_env:
+        _approved_from_env.discard(user_id)
+        removed = True
+
+    if not removed:
         await update.message.reply_text(f"Пользователь `{user_id_str}` не найден в списке.", parse_mode="Markdown")
         return
 
-    del approved[user_id_str]
-    _save_approved_users(approved)
+    # Новое значение env
+    all_ids = sorted(_approved_from_env | set(_approved_session.keys()))
+    env_value = ",".join(str(uid) for uid in all_ids) if all_ids else ""
 
-    await update.message.reply_text(f"✅ Доступ пользователя `{user_id_str}` отозван.", parse_mode="Markdown")
+    await update.message.reply_text(
+        f"✅ Доступ пользователя `{user_id_str}` отозван.\n\n"
+        f"Обновите Railway Variables:\n"
+        f"`APPROVED_USERS={env_value}`",
+        parse_mode="Markdown"
+    )
 
     # Уведомляем пользователя
     try:
         await context.bot.send_message(
-            int(user_id_str),
+            user_id,
             "⛔ Ваш доступ к боту был отозван администратором."
         )
     except Exception:
