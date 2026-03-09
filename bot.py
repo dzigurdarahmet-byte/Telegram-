@@ -1607,6 +1607,116 @@ def _detect_period(question: str) -> str:
     return "week"
 
 
+def _parse_multi_periods(question: str):
+    """Определить, нужны ли данные за несколько периодов (сравнение, история, тренд).
+
+    Возвращает список [(date_from, date_to, label), ...] или None если это обычный запрос.
+    Максимум 6 периодов.
+    """
+    q = question.lower()
+    today = datetime.now()
+    year = today.year
+
+    # --- Паттерн: "сравни февраль 2025 и февраль 2026" ---
+    # Ищем два месяца с годами: "месяц YYYY и/vs/— месяц YYYY"
+    m = re.search(
+        r'([а-яё]+)\s+(\d{4})\s+(?:и|vs|против|—|–|-)\s+([а-яё]+)\s+(\d{4})',
+        q
+    )
+    if m:
+        m1 = _parse_month_name(m.group(1))
+        y1 = int(m.group(2))
+        m2 = _parse_month_name(m.group(3))
+        y2 = int(m.group(4))
+        if m1 and m2:
+            ld1 = calendar.monthrange(y1, m1)[1]
+            ld2 = calendar.monthrange(y2, m2)[1]
+            return [
+                (f"{y1}-{m1:02d}-01", f"{y1}-{m1:02d}-{ld1:02d}",
+                 f"{m.group(1).capitalize()} {y1}"),
+                (f"{y2}-{m2:02d}-01", f"{y2}-{m2:02d}-{ld2:02d}",
+                 f"{m.group(3).capitalize()} {y2}"),
+            ]
+
+    # --- Паттерн: "сравни месяц и месяц" (без года — текущий/прошлый) ---
+    m = re.search(
+        r'сравни\w*\s+([а-яё]+)\s+(?:и|с|vs)\s+([а-яё]+)',
+        q
+    )
+    if m:
+        m1 = _parse_month_name(m.group(1))
+        m2 = _parse_month_name(m.group(2))
+        if m1 and m2:
+            y1 = year if m1 <= today.month else year - 1
+            y2 = year if m2 <= today.month else year - 1
+            ld1 = calendar.monthrange(y1, m1)[1]
+            ld2 = calendar.monthrange(y2, m2)[1]
+            return [
+                (f"{y1}-{m1:02d}-01", f"{y1}-{m1:02d}-{ld1:02d}",
+                 f"{m.group(1).capitalize()} {y1}"),
+                (f"{y2}-{m2:02d}-01", f"{y2}-{m2:02d}-{ld2:02d}",
+                 f"{m.group(2).capitalize()} {y2}"),
+            ]
+
+    # --- Паттерн: "по сравнению с прошлым годом" / "vs прошлый год" ---
+    if re.search(r'прошл\w+\s+год|год\s+назад|year.ago|vs.*прошл', q):
+        # Текущий месяц vs тот же месяц год назад
+        _month_names = [
+            "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+            "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+        ]
+        cm, cy = today.month, today.year
+        ld_cur = calendar.monthrange(cy, cm)[1]
+        ld_prev = calendar.monthrange(cy - 1, cm)[1]
+        end_cur = min(today.day, ld_cur)
+        end_prev = min(today.day, ld_prev)
+        return [
+            (f"{cy - 1}-{cm:02d}-01", f"{cy - 1}-{cm:02d}-{end_prev:02d}",
+             f"{_month_names[cm]} {cy - 1}"),
+            (f"{cy}-{cm:02d}-01", f"{cy}-{cm:02d}-{end_cur:02d}",
+             f"{_month_names[cm]} {cy}"),
+        ]
+
+    # --- Паттерн: "за последние N месяцев" / "за N месяцев" / "за квартал" ---
+    n_months = None
+    m = re.search(r'(?:последни[ех]\s+)?(\d+)\s*месяц', q)
+    if m:
+        n_months = int(m.group(1))
+    elif re.search(r'квартал|3\s*месяц', q):
+        n_months = 3
+    elif re.search(r'полгод|полугод|6\s*месяц', q):
+        n_months = 6
+
+    if n_months and n_months >= 2:
+        n_months = min(n_months, 6)
+        periods = []
+        for i in range(n_months - 1, -1, -1):
+            # Отматываем i месяцев назад
+            dt = today.replace(day=1) - timedelta(days=1) if i > 0 else today
+            # Вычисляем год и месяц
+            target_month = today.month - i
+            target_year = today.year
+            while target_month <= 0:
+                target_month += 12
+                target_year -= 1
+            last_day = calendar.monthrange(target_year, target_month)[1]
+            # Для текущего месяца ограничиваем сегодняшним днём
+            if i == 0:
+                last_day = min(today.day, last_day)
+            month_name = [
+                "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+            ][target_month]
+            periods.append((
+                f"{target_year}-{target_month:02d}-01",
+                f"{target_year}-{target_month:02d}-{last_day:02d}",
+                f"{month_name} {target_year}",
+            ))
+        return periods
+
+    return None
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
         keyboard = InlineKeyboardMarkup([
@@ -1667,15 +1777,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if forecast_text:
                 data = f"═══ ПРОГНОЗ ═══\n{forecast_text}\n\n═══ ТЕКУЩИЕ ДАННЫЕ ═══\n{data}"
         else:
-            # Обычный запрос — без прогноза
-            date_range = _parse_date_range(question)
-            if date_range:
-                date_from, date_to, label = date_range
-                logger.info(f"Распознан период: {date_from} — {date_to} ({label})")
-                data = await get_combined_data_by_dates(date_from, date_to, label)
+            # Проверяем мульти-период (сравнения, тренды, история)
+            multi = _parse_multi_periods(question)
+            if multi and iiko_server and len(multi) >= 2:
+                logger.info(f"Мульти-период: {len(multi)} периодов")
+                await msg.edit_text(
+                    f"🤔 Загружаю данные за {len(multi)} периодов..."
+                )
+                parts = []
+                for date_from, date_to, label in multi:
+                    try:
+                        summary = await iiko_server.get_sales_summary(date_from, date_to)
+                        parts.append(f"═══ ПЕРИОД: {label} ({date_from} — {date_to}) ═══\n{summary}")
+                    except Exception as e:
+                        parts.append(f"═══ ПЕРИОД: {label} ═══\n⚠️ Ошибка: {e}")
+                # Также добавляем данные доставки за все периоды
+                for date_from, date_to, label in multi:
+                    try:
+                        del_data = await iiko_server.get_delivery_sales_summary(date_from, date_to)
+                        parts.append(f"═══ ДОСТАВКА: {label} ═══\n{del_data}")
+                    except Exception:
+                        pass
+                data = "\n\n".join(parts)
             else:
-                period = _detect_period(question)
-                data = await get_combined_data(period)
+                # Обычный запрос — один период
+                date_range = _parse_date_range(question)
+                if date_range:
+                    date_from, date_to, label = date_range
+                    logger.info(f"Распознан период: {date_from} — {date_to} ({label})")
+                    data = await get_combined_data_by_dates(date_from, date_to, label)
+                else:
+                    period = _detect_period(question)
+                    data = await get_combined_data(period)
 
         data = "\n".join(
             line for line in data.split("\n")

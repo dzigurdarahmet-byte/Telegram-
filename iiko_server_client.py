@@ -1187,6 +1187,20 @@ class IikoServerClient:
 
         return result
 
+    async def get_multi_period_data(self, periods: list) -> dict:
+        """Запросить данные за несколько периодов.
+        periods = [("2025-02-01","2025-02-28"), ("2026-02-01","2026-02-28")]
+        Возвращает {label: summary_text, ...}
+        """
+        results = {}
+        for date_from, date_to in periods[:6]:  # макс 6 периодов
+            try:
+                summary = await self.get_sales_summary(date_from, date_to)
+                results[f"{date_from}__{date_to}"] = summary
+            except Exception as e:
+                results[f"{date_from}__{date_to}"] = f"⚠️ Ошибка: {e}"
+        return results
+
     async def test_connection(self) -> str:
         """Тест подключения"""
         try:
