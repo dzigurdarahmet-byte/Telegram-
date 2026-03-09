@@ -1717,6 +1717,24 @@ def _parse_date_range(question: str):
         label = f"{d1:02d}.{m1:02d} — {d2:02d}.{m2:02d}"
         return date_from, date_to, label
 
+    # Паттерн: "8 марта", "14 февраля", "25 декабря" — конкретная дата
+    m = re.search(r'(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?', q)
+    if m:
+        day = int(m.group(1))
+        month = _parse_month_name(m.group(2))
+        if month and 1 <= day <= 31:
+            y = int(m.group(3)) if m.group(3) else year
+            if not m.group(3) and (month > today.month or (month == today.month and day > today.day)):
+                y -= 1
+            try:
+                from datetime import date as _date
+                _date(y, month, day)
+                date_str = f"{y}-{month:02d}-{day:02d}"
+                label = f"{day} {m.group(2)} {y}"
+                return date_str, date_str, label
+            except ValueError:
+                pass
+
     return None
 
 
@@ -1741,7 +1759,56 @@ def _parse_multi_periods(question: str):
     """
     q = question.lower()
     today = datetime.now()
+    today_date = today.date()
     year = today.year
+
+    # --- Паттерн: "сравни вчера и/с позавчера" ---
+    if re.search(r'вчера\s+(?:и|с|vs|против)\s+позавчера|позавчера\s+(?:и|с|vs)\s+вчера', q):
+        yesterday = today_date - timedelta(days=1)
+        day_before = today_date - timedelta(days=2)
+        return [
+            (day_before.strftime("%Y-%m-%d"), day_before.strftime("%Y-%m-%d"), "Позавчера"),
+            (yesterday.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"), "Вчера"),
+        ]
+
+    # --- Паттерн: "сравни сегодня и/с вчера" ---
+    if re.search(r'сегодня\s+(?:и|с|vs)\s+вчера|вчера\s+(?:и|с|vs)\s+сегодня', q):
+        yesterday = today_date - timedelta(days=1)
+        return [
+            (yesterday.strftime("%Y-%m-%d"), yesterday.strftime("%Y-%m-%d"), "Вчера"),
+            (today_date.strftime("%Y-%m-%d"), today_date.strftime("%Y-%m-%d"), "Сегодня"),
+        ]
+
+    # --- Паттерн: "сравни эту неделю с прошлой" ---
+    if re.search(r'(?:эт|текущ)\w*\s+недел\w*\s+(?:и|с|vs|против)\s+прошл\w*|прошл\w*\s+недел\w*\s+(?:и|с|vs)\s+(?:эт|текущ)', q):
+        weekday = today_date.weekday()
+        this_monday = today_date - timedelta(days=weekday)
+        prev_monday = this_monday - timedelta(days=7)
+        prev_sunday = this_monday - timedelta(days=1)
+        return [
+            (prev_monday.strftime("%Y-%m-%d"), prev_sunday.strftime("%Y-%m-%d"), "Прошлая неделя"),
+            (this_monday.strftime("%Y-%m-%d"), today_date.strftime("%Y-%m-%d"), "Эта неделя"),
+        ]
+
+    # --- Паттерн: "февраль 2025 и 2026" (один месяц, два года) ---
+    m = re.search(
+        r'([а-яё]+)\s+(\d{4})\s+(?:и|vs|против|—|–|-)\s+(\d{4})',
+        q
+    )
+    if m:
+        month_name = m.group(1)
+        month_num = _parse_month_name(month_name)
+        y1 = int(m.group(2))
+        y2 = int(m.group(3))
+        if month_num:
+            ld1 = calendar.monthrange(y1, month_num)[1]
+            ld2 = calendar.monthrange(y2, month_num)[1]
+            return [
+                (f"{y1}-{month_num:02d}-01", f"{y1}-{month_num:02d}-{ld1:02d}",
+                 f"{month_name.capitalize()} {y1}"),
+                (f"{y2}-{month_num:02d}-01", f"{y2}-{month_num:02d}-{ld2:02d}",
+                 f"{month_name.capitalize()} {y2}"),
+            ]
 
     # --- Паттерн: "сравни февраль 2025 и февраль 2026" ---
     # Ищем два месяца с годами: "месяц YYYY и/vs/— месяц YYYY"
@@ -1912,18 +1979,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 parts = []
                 for date_from, date_to, label in multi:
+                    period_parts = []
+                    # Зал
                     try:
                         summary = await iiko_server.get_sales_summary(date_from, date_to)
-                        parts.append(f"═══ ПЕРИОД: {label} ({date_from} — {date_to}) ═══\n{summary}")
+                        period_parts.append(f"🍽️ ЗАЛ:\n{summary}")
                     except Exception as e:
-                        parts.append(f"═══ ПЕРИОД: {label} ═══\n⚠️ Ошибка: {e}")
-                # Также добавляем данные доставки за все периоды
-                for date_from, date_to, label in multi:
+                        period_parts.append(f"⚠️ Зал: {e}")
+                    # Доставка
                     try:
                         del_data = await iiko_server.get_delivery_sales_summary(date_from, date_to)
-                        parts.append(f"═══ ДОСТАВКА: {label} ═══\n{del_data}")
+                        period_parts.append(f"📦 ДОСТАВКА:\n{del_data}")
                     except Exception:
                         pass
+                    parts.append(
+                        f"═══ ПЕРИОД: {label} ({date_from} — {date_to}) ═══\n"
+                        + "\n".join(period_parts)
+                    )
                 data = "\n\n".join(parts)
             else:
                 # Обычный запрос — один период
