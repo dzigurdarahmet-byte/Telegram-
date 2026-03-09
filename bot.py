@@ -92,6 +92,30 @@ def _extract_sheet_id(text: str) -> str:
 EXCLUDED_STAFF = ["Стаховский Сергей", "denvic"]
 
 
+def _extract_dish_names(data_text: str) -> list:
+    """Извлечь названия блюд из форматированного текста OLAP-данных.
+    Формат строк:  '  НазваниеБлюда | 5 шт | 3500 руб.' или с группой.
+    """
+    names = []
+    for line in data_text.split("\n"):
+        line = line.strip()
+        if "|" in line and ("шт" in line or "руб" in line):
+            parts = line.split("|")
+            if len(parts) >= 2:
+                name = parts[0].strip()
+                # Пропускаем заголовки и итоги
+                if name and not name.startswith("═") and not name.startswith("—"):
+                    names.append(name)
+    # Убираем дубли, сохраняя порядок
+    seen = set()
+    unique = []
+    for n in names:
+        if n not in seen:
+            seen.add(n)
+            unique.append(n)
+    return unique
+
+
 # ─── Система регистрации пользователей ────────────────────
 
 APPROVED_USERS_FILE = os.path.join(os.path.dirname(__file__) or ".", "approved_users.json")
@@ -391,7 +415,8 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
             line for line in data.split("\n")
             if not any(name in line for name in EXCLUDED_STAFF)
         )
-        analysis = claude.analyze(question, data)
+        dish_names = _extract_dish_names(data)
+        analysis = claude.analyze(question, data, dish_names=dish_names)
         await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -1371,7 +1396,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             line for line in data.split("\n")
             if not any(name in line for name in EXCLUDED_STAFF)
         )
-        analysis = claude.analyze(question, data)
+        dish_names = _extract_dish_names(data)
+        analysis = claude.analyze(question, data, dish_names=dish_names)
         await _safe_send(msg, analysis, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
