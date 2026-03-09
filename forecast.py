@@ -300,23 +300,60 @@ class LoadForecaster:
             "warning": warning,
         }
 
-    def recommend_staff(self, forecast: dict, hour_distribution: dict = None) -> dict:
+    def recommend_staff(self, forecast: dict, patterns: dict = None) -> dict:
         """
-        Рекомендация по персоналу на основе прогноза.
+        Рекомендация по персоналу Вилла Россо.
+
+        Базовый состав (минимум, ниже нельзя):
+          Будни (пн-чт): кухня 3 повара + 1 заготовщик, зал 1 официант + 1 стажёр
+          Выходные (пт-вс): кухня 5 поваров + 1 заготовщик, зал 2-3 официанта + 1 стажёр + 1 хостес
+
+        Шеф, администратор и управляющий всегда на месте — не показываем.
+        Если прогноз >150% от среднего или праздник — выходной состав даже в будни.
         """
         if "error" in forecast:
             return {"error": forecast["error"]}
 
-        orders = forecast.get("orders", 0)
-        dishes = forecast.get("dishes", 0)
+        wd = forecast.get("weekday", 0)
+        is_weekend = wd >= 4  # пт=4, сб=5, вс=6
 
-        # Минимум официантов: 1 на ~35 заказов
-        min_waiters = max(1, math.ceil(orders / 35))
-        # Повара: 1 на ~55 блюд
-        min_cooks = max(1, math.ceil(dishes / 55))
+        # Определяем, нужно ли усиление
+        is_high_load = False
+        if patterns and "weekday_avg" in patterns:
+            avg_rev = patterns["weekday_avg"].get(wd, {}).get("revenue", 0)
+            if avg_rev > 0 and forecast.get("revenue", 0) > avg_rev * 1.5:
+                is_high_load = True
+
+        is_holiday = bool(forecast.get("holiday_name"))
+
+        # Праздник или высокая нагрузка в будни → выходной состав
+        use_weekend_staff = is_weekend or is_holiday or is_high_load
+
+        # --- Кухня ---
+        if use_weekend_staff:
+            cooks = 5
+        else:
+            cooks = 3
+        prep = 1  # заготовщик всегда 1
+
+        # --- Зал ---
+        if use_weekend_staff:
+            waiters = 3 if (is_holiday or is_high_load) else 2
+            trainees = 1
+            hostess = 1
+        else:
+            waiters = 1
+            trainees = 1
+            hostess = 0
+
+        # Дополнительное усиление при очень высокой нагрузке
+        if is_high_load and is_weekend:
+            cooks += 1
+            waiters += 1
 
         # Пиковые часы
         peak_hours = []
+        hour_distribution = patterns.get("hour_distribution") if patterns else None
         if hour_distribution:
             total_hourly_rev = sum(
                 h["revenue"] for h in hour_distribution.values()
@@ -328,15 +365,17 @@ class LoadForecaster:
                 if data["revenue"] > avg_hourly * 1.5:
                     peak_hours.append(hour_str)
 
-        extra_staff = 1 if peak_hours else 0
-
         return {
-            "min_waiters": min_waiters,
-            "min_cooks": min_cooks,
+            "cooks": cooks,
+            "prep": prep,
+            "waiters": waiters,
+            "trainees": trainees,
+            "hostess": hostess,
             "peak_hours": peak_hours,
-            "extra_during_peak": extra_staff,
-            "total_waiters_recommended": min_waiters + extra_staff,
-            "total_cooks_recommended": min_cooks + (1 if peak_hours else 0),
+            "is_weekend_staff": use_weekend_staff,
+            "is_high_load": is_high_load,
+            "kitchen_total": cooks + prep,
+            "hall_total": waiters + trainees + hostess,
         }
 
     def format_forecast(self, forecast: dict, staff: dict = None) -> str:
@@ -372,14 +411,19 @@ class LoadForecaster:
         # Персонал
         if staff and "error" not in staff:
             lines.append("")
-            lines.append("👥 Рекомендация по персоналу:")
-            lines.append(f"  Официантов: минимум {staff['min_waiters']}"
-                         f" (рекомендуем {staff['total_waiters_recommended']})")
-            lines.append(f"  Поваров: минимум {staff['min_cooks']}"
-                         f" (рекомендуем {staff['total_cooks_recommended']})")
+            mode = "выходной" if staff.get("is_weekend_staff") else "будний"
+            if staff.get("is_high_load"):
+                mode += " + усиление"
+            lines.append(f"👥 Персонал ({mode} состав):")
+            lines.append(f"  Кухня: {staff['cooks']} поваров + {staff['prep']} заготовщик")
+            hostess_str = f" + {staff['hostess']} хостес" if staff['hostess'] else ""
+            lines.append(
+                f"  Зал: {staff['waiters']} официант(ов) + "
+                f"{staff['trainees']} стажёр{hostess_str}"
+            )
             if staff.get("peak_hours"):
                 hours_str = ", ".join(f"{h}:00" for h in staff["peak_hours"][:5])
-                lines.append(f"  Пиковые часы: {hours_str} — нужно усиление")
+                lines.append(f"  Пиковые часы: {hours_str}")
 
         # Тренд
         trend_pct = forecast.get("trend_pct", 0)
@@ -418,8 +462,14 @@ class LoadForecaster:
             d = fc["date"][5:]  # MM-DD
             rev = fc["revenue"]
             ords = fc["orders"]
-            waiters = st.get("total_waiters_recommended", "?") if "error" not in st else "?"
-            cooks = st.get("total_cooks_recommended", "?") if "error" not in st else "?"
+
+            if "error" not in st:
+                staff_str = (f"👨‍🍳{st['cooks']}+{st['prep']} "
+                             f"👥{st['waiters']}+{st['trainees']}")
+                if st["hostess"]:
+                    staff_str += f"+H{st['hostess']}"
+            else:
+                staff_str = "?"
 
             holiday_mark = ""
             if fc.get("holiday_name"):
@@ -427,7 +477,7 @@ class LoadForecaster:
 
             lines.append(
                 f"  {wd} {d} | ~{rev:>7,} руб. | ~{ords:>3} зак. "
-                f"| 👥{waiters}+👨‍🍳{cooks}{holiday_mark}"
+                f"| {staff_str}{holiday_mark}"
                     .replace(",", " ")
             )
 
@@ -456,38 +506,48 @@ class LoadForecaster:
         return "\n".join(lines)
 
     def format_staff_plan(self, forecasts: list, staffs: list) -> str:
-        """План персонала на неделю"""
+        """План персонала на неделю (Вилла Россо)"""
         if not forecasts:
             return "⚠️ Нет данных для планирования"
 
-        lines = ["👥 План персонала на неделю", ""]
-        lines.append("  День       | Официанты | Повара | Пиковые часы")
-        lines.append("  " + "-" * 55)
+        lines = [
+            "👥 План персонала на неделю",
+            "",
+            "  День      | Повара | Загот | Офиц | Стаж | Хостес | Пиковые часы",
+            "  " + "-" * 65,
+        ]
 
         for fc, st in zip(forecasts, staffs):
             if "error" in fc or "error" in st:
                 continue
             wd = fc["weekday_name"][:3]
             d = fc["date"][5:]
-            waiters = st["total_waiters_recommended"]
-            cooks = st["total_cooks_recommended"]
             peaks = ", ".join(f"{h}:00" for h in st.get("peak_hours", [])[:3]) or "—"
 
-            holiday_mark = " 🎉" if fc.get("holiday_name") else ""
+            holiday_mark = " 🎉" if fc.get("holiday_name") else "   "
+            hostess_str = f"{st['hostess']:>3}" if st["hostess"] else "  —"
+
             lines.append(
-                f"  {wd} {d}{holiday_mark:3} | {waiters:>9} | {cooks:>6} | {peaks}"
+                f"  {wd} {d}{holiday_mark}|"
+                f" {st['cooks']:>4}   |"
+                f" {st['prep']:>3}   |"
+                f" {st['waiters']:>2}   |"
+                f" {st['trainees']:>2}   |"
+                f" {hostess_str}    |"
+                f" {peaks}"
             )
 
+        lines.append("  " + "-" * 65)
+
+        # Итоги
+        max_cooks = max(
+            (s.get("cooks", 0) for s in staffs if "error" not in s), default=0
+        )
+        max_waiters = max(
+            (s.get("waiters", 0) for s in staffs if "error" not in s), default=0
+        )
         lines.append("")
-        # Макс нужно
-        max_w = max(
-            (s.get("total_waiters_recommended", 0) for s in staffs if "error" not in s),
-            default=0
-        )
-        max_c = max(
-            (s.get("total_cooks_recommended", 0) for s in staffs if "error" not in s),
-            default=0
-        )
-        lines.append(f"📋 Максимум на неделе: {max_w} официантов, {max_c} поваров")
+        lines.append(f"📋 Макс. на неделе: {max_cooks} поваров, {max_waiters} официантов")
+        lines.append("ℹ️ Шеф, администратор, управляющий — всегда на месте")
 
         return "\n".join(lines)

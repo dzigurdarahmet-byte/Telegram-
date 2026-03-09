@@ -809,7 +809,7 @@ async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parts = []
         for target in [today, tomorrow]:
             fc = forecaster.forecast_day(target, patterns)
-            staff = forecaster.recommend_staff(fc, patterns.get("hour_distribution"))
+            staff = forecaster.recommend_staff(fc, patterns)
             parts.append(forecaster.format_forecast(fc, staff))
 
         text = "\n\n" + ("═" * 35) + "\n\n"
@@ -840,7 +840,7 @@ async def cmd_forecast_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(7):
             target = today + timedelta(days=i)
             fc = forecaster.forecast_day(target, patterns)
-            st = forecaster.recommend_staff(fc, patterns.get("hour_distribution"))
+            st = forecaster.recommend_staff(fc, patterns)
             forecasts.append(fc)
             staffs.append(st)
 
@@ -872,7 +872,7 @@ async def cmd_staff_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i in range(7):
             target = today + timedelta(days=i)
             fc = forecaster.forecast_day(target, patterns)
-            st = forecaster.recommend_staff(fc, patterns.get("hour_distribution"))
+            st = forecaster.recommend_staff(fc, patterns)
             forecasts.append(fc)
             staffs.append(st)
 
@@ -1347,9 +1347,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parts_fc = []
                     for target in [today, tomorrow]:
                         fc = forecaster.forecast_day(target, patterns)
-                        st = forecaster.recommend_staff(
-                            fc, patterns.get("hour_distribution")
-                        )
+                        st = forecaster.recommend_staff(fc, patterns)
                         parts_fc.append(forecaster.format_forecast(fc, st))
                     forecast_text = "\n\n".join(parts_fc)
 
@@ -1396,9 +1394,7 @@ async def send_morning_report(context: ContextTypes.DEFAULT_TYPE):
                 if "error" not in patterns:
                     today = datetime.now().date()
                     fc = forecaster.forecast_day(today, patterns)
-                    st = forecaster.recommend_staff(
-                        fc, patterns.get("hour_distribution")
-                    )
+                    st = forecaster.recommend_staff(fc, patterns)
                     forecast_block = "\n\n" + forecaster.format_forecast(fc, st)
         except Exception as e:
             logger.warning(f"Прогноз для утреннего отчёта: {e}")
