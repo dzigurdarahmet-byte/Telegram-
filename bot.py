@@ -1422,13 +1422,139 @@ async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "обновите кэш прогноза!"
             )
 
-    # Формируем итог Senior
+    # Формируем итог Senior (бизнес-данные)
     if senior_issues:
-        report_lines.append(f"\n🔍 *Senior:* найдено {len(senior_issues)} замечаний:")
+        report_lines.append(f"\n🔍 *Senior (данные):* найдено {len(senior_issues)} замечаний:")
         for i, issue in enumerate(senior_issues, 1):
             report_lines.append(f"  {i}. {issue}")
     else:
-        report_lines.append("\n✅ *Senior:* бизнес-проверки пройдены, замечаний нет")
+        report_lines.append("\n✅ *Senior (данные):* бизнес-проверки пройдены")
+
+    # ═══════════════════════════════════════════════════════════
+    # SENIOR: функциональные тесты — реальные сценарии
+    # ═══════════════════════════════════════════════════════════
+    await msg.edit_text(
+        "🔍 Junior + Middle + Senior (данные) готовы.\n"
+        "Запускаю функциональные тесты (5 реальных запросов)..."
+    )
+
+    func_pass = 0
+    func_total = 5
+    func_issues = []
+
+    async def _run_scenario(query: str, check_fn, description: str):
+        """Прогнать сценарий: получить данные + ответ Claude, проверить результат."""
+        nonlocal func_pass
+        try:
+            # Определяем период и загружаем данные — как в handle_message
+            multi = _parse_multi_periods(query)
+            if multi and iiko_server and len(multi) >= 2:
+                parts = []
+                for df, dt, lbl in multi:
+                    try:
+                        s = await iiko_server.get_sales_summary(df, dt)
+                        parts.append(f"═══ ПЕРИОД: {lbl} ({df} — {dt}) ═══\n{s}")
+                    except Exception as exc:
+                        parts.append(f"═══ ПЕРИОД: {lbl} ═══\n⚠️ {exc}")
+                data = "\n\n".join(parts)
+            else:
+                date_range = _parse_date_range(query)
+                if date_range:
+                    df, dt, lbl = date_range
+                    data = await get_combined_data_by_dates(df, dt, lbl)
+                else:
+                    period = _detect_period(query)
+                    data = await get_combined_data(period)
+
+            # Фильтруем исключённых
+            data = "\n".join(
+                line for line in data.split("\n")
+                if not any(name in line for name in EXCLUDED_STAFF)
+            )
+            dish_names = _extract_dish_names(data)
+            answer = claude.analyze(query, data, dish_names=dish_names)
+
+            # Проверяем ответ
+            ok, reason = check_fn(answer)
+            if ok:
+                func_pass += 1
+            else:
+                func_issues.append(f"'{query}' — {reason}")
+        except Exception as e:
+            func_issues.append(f"'{query}' — исключение: {e}")
+
+    def _has_numbers(text):
+        """Есть ли в тексте хотя бы одно число > 0"""
+        import re as _re
+        nums = _re.findall(r'\d[\d\s]*\d|\d+', text.replace(" ", ""))
+        return any(int(n) > 0 for n in nums if n.isdigit())
+
+    # 1. Выручка за вчера
+    await _run_scenario(
+        "Выручка за вчера",
+        lambda ans: (
+            (_has_numbers(ans) and "нет данных" not in ans.lower()),
+            "нет цифр или говорит 'нет данных'"
+        ),
+        "выручка за вчера"
+    )
+
+    # 2. Выручка за прошлый месяц
+    prev = datetime.now().replace(day=1) - timedelta(days=1)
+    prev_month_name = [
+        "", "январ", "феврал", "март", "апрел", "ма", "июн",
+        "июл", "август", "сентябр", "октябр", "ноябр", "декабр"
+    ][prev.month]
+    await _run_scenario(
+        f"Выручка за {prev.strftime('%B %Y').lower()}",
+        lambda ans: (
+            (_has_numbers(ans) and "нет данных" not in ans.lower()),
+            "нет цифр или говорит 'нет данных'"
+        ),
+        "выручка за прошлый месяц"
+    )
+
+    # 3. Сравни вчера и позавчера
+    await _run_scenario(
+        "Сравни вчера и позавчера",
+        lambda ans: (
+            _has_numbers(ans),
+            "нет цифр в сравнении"
+        ),
+        "сравнение двух дней"
+    )
+
+    # 4. Топ блюд за вчера
+    await _run_scenario(
+        "Топ-5 блюд за вчера",
+        lambda ans: (
+            (_has_numbers(ans) and len(ans) > 50),
+            "ответ слишком короткий или без данных"
+        ),
+        "топ блюд"
+    )
+
+    # 5. Прогноз на завтра
+    if iiko_server:
+        try:
+            await _ensure_forecast_data()
+        except Exception:
+            pass
+    await _run_scenario(
+        "Прогноз на завтра",
+        lambda ans: (
+            (_has_numbers(ans) and "нет данных" not in ans.lower()),
+            "нет цифр прогноза или говорит 'нет данных'"
+        ),
+        "прогноз"
+    )
+
+    func_emoji = "✅" if func_pass == func_total else "🔴"
+    report_lines.append(
+        f"\n{func_emoji} *Senior (тесты):* {func_pass}/{func_total} сценариев пройдено"
+    )
+    for issue in func_issues:
+        report_lines.append(f"  — {issue}")
 
     full_report = "\n".join(report_lines)
     await _safe_send(msg, full_report, update)
