@@ -4,6 +4,7 @@ Telegram-бот для аналитики ресторана
 """
 
 import asyncio
+import calendar
 import re
 import logging
 from datetime import datetime, timedelta
@@ -144,6 +145,31 @@ async def get_combined_data(period: str) -> str:
             parts.append(f"⚠️ Доставка: {e}")
 
     # 3. Данные зала (локальный сервер)
+    if iiko_server:
+        try:
+            server_data = await iiko_server.get_sales_summary(date_from, date_to)
+            parts.append(f"🍽️ ЗАЛ:\n{server_data}")
+        except Exception as e:
+            parts.append(f"⚠️ Зал: {e}")
+
+    separator = "\n\n" + "═" * 40 + "\n\n"
+    return separator.join(parts)
+
+
+async def get_combined_data_by_dates(date_from: str, date_to: str, label: str) -> str:
+    """Собрать данные из ВСЕХ источников по явным датам (без стоп-листа)"""
+    parts = []
+
+    # 1. Данные доставки
+    if iiko_server:
+        try:
+            delivery_data = await iiko_server.get_delivery_sales_summary(date_from, date_to)
+            parts.append(delivery_data)
+        except Exception as e:
+            logger.warning(f"OLAP доставка: {e}")
+            parts.append(f"⚠️ Доставка: {e}")
+
+    # 2. Данные зала (локальный сервер)
     if iiko_server:
         try:
             server_data = await iiko_server.get_sales_summary(date_from, date_to)
@@ -680,6 +706,75 @@ async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Самопроверка кода: Junior → Middle → Senior"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔍 Запускаю самопроверку кода (Junior → Middle → Senior)...")
+
+    # Собираем исходный код всех модулей
+    import os
+    code_files = {}
+    for fname in ["bot.py", "claude_analytics.py", "iiko_server_client.py",
+                   "iiko_client.py", "config.py"]:
+        fpath = os.path.join(os.path.dirname(__file__) or ".", fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                code_files[fname] = f.read()
+        except Exception:
+            code_files[fname] = "(не удалось прочитать)"
+
+    code_text = "\n\n".join(
+        f"=== {name} ===\n{content[:3000]}"
+        for name, content in code_files.items()
+    )
+
+    checks = [
+        (
+            "Junior",
+            "Ты — Junior Python-разработчик. Проверь этот код на:\n"
+            "1. Синтаксические ошибки\n"
+            "2. Неправильные импорты\n"
+            "3. Опечатки в названиях переменных/функций\n"
+            "4. Незакрытые скобки, кавычки\n"
+            "5. Неиспользуемые переменные\n"
+            "Формат: список найденных проблем с номерами строк. "
+            "Если всё ок — напиши ✅."
+        ),
+        (
+            "Middle",
+            "Ты — Middle Python-разработчик. Проверь этот код на:\n"
+            "1. Логические ошибки (неправильные условия, edge cases)\n"
+            "2. Обработка ошибок (пропущенные try/except, молчаливое проглатывание)\n"
+            "3. Race conditions в async коде\n"
+            "4. Утечки ресурсов (незакрытые соединения)\n"
+            "5. Проблемы с типами данных (неявные преобразования)\n"
+            "Формат: проблема → рекомендация. Если всё ок — напиши ✅."
+        ),
+        (
+            "Senior",
+            "Ты — Senior Python-разработчик и архитектор. Проверь этот код на:\n"
+            "1. Архитектурные проблемы (связность, cohesion)\n"
+            "2. Производительность (лишние запросы, неэффективные алгоритмы)\n"
+            "3. Безопасность (инъекции, утечка секретов, SSRF)\n"
+            "4. Масштабируемость (что сломается при росте нагрузки)\n"
+            "5. Качество API-дизайна\n"
+            "Формат: краткие рекомендации с приоритетами (P0/P1/P2)."
+        ),
+    ]
+
+    results = []
+    for level, prompt in checks:
+        try:
+            result = claude.analyze(prompt, code_text)
+            results.append(f"{'='*30}\n🔎 {level.upper()}-ПРОВЕРКА\n{'='*30}\n{result}")
+        except Exception as e:
+            results.append(f"⚠️ {level}: ошибка — {e}")
+
+    full_report = "\n\n".join(results)
+    await _safe_send(msg, full_report, update)
+
+
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
         return
@@ -736,6 +831,110 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+MONTH_MAP = {
+    "январ": 1, "феврал": 2, "март": 3, "марта": 3,
+    "апрел": 4, "мая": 5, "май": 5, "июн": 6,
+    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10,
+    "ноябр": 11, "декабр": 12,
+}
+
+
+def _parse_month_name(text: str) -> int | None:
+    """Распознать название месяца в тексте"""
+    t = text.lower().strip().rstrip("яьюи")
+    for prefix, num in MONTH_MAP.items():
+        if prefix in t or t.startswith(prefix[:4]):
+            return num
+    return None
+
+
+def _parse_date_range(question: str):
+    """
+    Извлечь диапазон дат из текста пользователя.
+    Поддерживает форматы:
+      "1-26 февраля", "с 1 по 26 февраля", "1 февраля - 26 февраля",
+      "01.02-26.02", "01.02.2026-26.02.2026", "за февраль"
+    Возвращает (date_from, date_to, label) или None.
+    """
+    q = question.lower()
+    today = datetime.now()
+    year = today.year
+
+    # Паттерн: "с 1 по 26 февраля" или "1-26 февраля" или "1 - 26 февраля"
+    m = re.search(
+        r'(?:с\s+)?(\d{1,2})\s*[-–—по]+\s*(\d{1,2})\s+([а-яё]+)',
+        q
+    )
+    if m:
+        day1, day2 = int(m.group(1)), int(m.group(2))
+        month = _parse_month_name(m.group(3))
+        if month:
+            # Если месяц в будущем текущего года, берём прошлый
+            if month > today.month:
+                year -= 1
+            date_from = f"{year}-{month:02d}-{day1:02d}"
+            date_to = f"{year}-{month:02d}-{day2:02d}"
+            label = f"{day1}-{day2} {m.group(3)}"
+            return date_from, date_to, label
+
+    # Паттерн: "1 февраля - 26 февраля" или "1 февраля по 26 марта"
+    m = re.search(
+        r'(\d{1,2})\s+([а-яё]+)\s*[-–—]\s*(\d{1,2})\s+([а-яё]+)',
+        q
+    )
+    if not m:
+        m = re.search(
+            r'(?:с\s+)?(\d{1,2})\s+([а-яё]+)\s+по\s+(\d{1,2})\s+([а-яё]+)',
+            q
+        )
+    if m:
+        day1, month1_str, day2, month2_str = (
+            int(m.group(1)), m.group(2), int(m.group(3)), m.group(4)
+        )
+        month1 = _parse_month_name(month1_str)
+        month2 = _parse_month_name(month2_str)
+        if month1 and month2:
+            y1 = year - 1 if month1 > today.month else year
+            y2 = year - 1 if month2 > today.month else year
+            date_from = f"{y1}-{month1:02d}-{day1:02d}"
+            date_to = f"{y2}-{month2:02d}-{day2:02d}"
+            label = f"{day1} {month1_str} — {day2} {month2_str}"
+            return date_from, date_to, label
+
+    # Паттерн: "за февраль", "в январе", "февраль 2025"
+    m = re.search(r'(?:за|в|на)\s+([а-яё]+)(?:\s+(\d{4}))?', q)
+    if not m:
+        m = re.search(r'([а-яё]+)\s+(\d{4})', q)
+    if m:
+        month = _parse_month_name(m.group(1))
+        if month:
+            y = int(m.group(2)) if m.group(2) else year
+            if not m.group(2) and month > today.month:
+                y -= 1
+            last_day = calendar.monthrange(y, month)[1]
+            date_from = f"{y}-{month:02d}-01"
+            date_to = f"{y}-{month:02d}-{last_day:02d}"
+            label = f"{m.group(1).capitalize()} {y}"
+            return date_from, date_to, label
+
+    # Паттерн: "01.02-26.02" или "01.02.2026-26.02.2026"
+    m = re.search(
+        r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s*[-–—]\s*(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?',
+        q
+    )
+    if m:
+        d1, m1 = int(m.group(1)), int(m.group(2))
+        y1 = int(m.group(3)) if m.group(3) else year
+        d2, m2 = int(m.group(4)), int(m.group(5))
+        y2 = int(m.group(6)) if m.group(6) else year
+        date_from = f"{y1}-{m1:02d}-{d1:02d}"
+        date_to = f"{y2}-{m2:02d}-{d2:02d}"
+        label = f"{d1:02d}.{m1:02d} — {d2:02d}.{m2:02d}"
+        return date_from, date_to, label
+
+    return None
+
+
 def _detect_period(question: str) -> str:
     q = question.lower()
     if any(w in q for w in ["сегодня", "сейчас", "текущ"]):
@@ -770,8 +969,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = await update.message.reply_text("🤔 Анализирую...")
     try:
-        period = _detect_period(question)
-        data = await get_combined_data(period)
+        # Сначала пробуем извлечь точные даты из вопроса
+        date_range = _parse_date_range(question)
+        if date_range:
+            date_from, date_to, label = date_range
+            logger.info(f"Распознан период: {date_from} — {date_to} ({label})")
+            data = await get_combined_data_by_dates(date_from, date_to, label)
+        else:
+            period = _detect_period(question)
+            data = await get_combined_data(period)
         data = "\n".join(
             line for line in data.split("\n")
             if not any(name in line for name in EXCLUDED_STAFF)
@@ -829,6 +1035,7 @@ async def post_init(application: Application):
         BotCommand("sheet", "Текущая таблица зарплат"),
         BotCommand("abc", "ABC-анализ"),
         BotCommand("diag", "Диагностика"),
+        BotCommand("selfcheck", "Самопроверка кода"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -862,6 +1069,7 @@ def main():
     app.add_handler(CommandHandler("debugemp", cmd_debugemp))
     app.add_handler(CommandHandler("debugcooks", cmd_debugcooks))
     app.add_handler(CommandHandler("debugstop", cmd_debugstop))
+    app.add_handler(CommandHandler("selfcheck", cmd_selfcheck))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
