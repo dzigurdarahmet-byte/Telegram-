@@ -5,6 +5,7 @@
 
 import calendar
 import logging
+import re
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -50,6 +51,39 @@ class WaiterKPI:
         self.excluded = [name.lower() for name in excluded]
         self.default_target = default_target
 
+    @staticmethod
+    def _clean_olap_name(olap_name: str) -> str:
+        """Убрать числовой суффикс: 'Калмыков Альберт402781' → 'Калмыков Альберт'"""
+        return re.sub(r'\d+$', '', olap_name).strip()
+
+    def _match_staff_role(self, olap_name: str) -> tuple:
+        """Найти роль сотрудника по имени из OLAP (с числовым суффиксом).
+
+        Returns:
+            (clean_name, staff_info) или (clean_name, None) если не найден.
+        """
+        clean = self._clean_olap_name(olap_name)
+        # Точное совпадение
+        if clean in self.staff_roles:
+            return clean, self.staff_roles[clean]
+        # Совпадение по фамилии (первое слово)
+        clean_surname = clean.split()[0] if clean else ""
+        for staff_name, role_data in self.staff_roles.items():
+            if staff_name.split()[0] == clean_surname:
+                return staff_name, role_data
+        return clean, None
+
+    def _is_excluded(self, olap_name: str) -> bool:
+        """Проверить, исключён ли сотрудник из KPI"""
+        clean = self._clean_olap_name(olap_name).lower()
+        # Проверяем полное имя и фамилию
+        clean_surname = clean.split()[0] if clean else ""
+        for excl in self.excluded:
+            excl_lower = excl.lower()
+            if clean == excl_lower or clean_surname == excl_lower.split()[0]:
+                return True
+        return False
+
     async def get_kpi_data(self, date_from: str, date_to: str) -> list:
         """
         Запрос OLAP с группировкой по официанту и дате.
@@ -62,26 +96,32 @@ class WaiterKPI:
                               "UniqOrderId.OrdersCount"]
         )
 
-        # Агрегируем по сотруднику
+        # Агрегируем по сотруднику (ключ — чистое имя)
         by_waiter = defaultdict(lambda: {
             "revenue": 0, "orders": 0, "dishes": 0, "dates": set(),
             "first_date": None, "last_date": None,
         })
 
+        # Маппинг: чистое имя → (display_name, staff_info)
+        name_map = {}
+
         for row in rows:
-            name = (row.get("OrderWaiter.Name") or row.get("Официант") or "").strip()
-            if not name:
+            raw_name = (row.get("OrderWaiter.Name") or row.get("Официант") or "").strip()
+            if not raw_name:
                 continue
             # Исключаем
-            if name.lower() in self.excluded:
+            if self._is_excluded(raw_name):
                 continue
+
+            # Сопоставляем с ролями
+            display_name, staff_info = self._match_staff_role(raw_name)
 
             revenue = _safe_float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой"))
             orders = _safe_float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов"))
             dishes = _safe_float(row.get("DishAmountInt") or row.get("Количество блюд"))
             date_str = (row.get("OpenDate.Typed") or row.get("Учетный день") or "")[:10]
 
-            w = by_waiter[name]
+            w = by_waiter[display_name]
             w["revenue"] += revenue
             w["orders"] += orders
             w["dishes"] += dishes
@@ -92,6 +132,9 @@ class WaiterKPI:
                 if w["last_date"] is None or date_str > w["last_date"]:
                     w["last_date"] = date_str
 
+            if display_name not in name_map:
+                name_map[display_name] = staff_info
+
         # Формируем результат
         result = []
         for name, data in by_waiter.items():
@@ -99,8 +142,7 @@ class WaiterKPI:
             total_revenue = data["revenue"]
             total_orders = data["orders"]
 
-            # Определяем роль и цель
-            staff_info = self.staff_roles.get(name)
+            staff_info = name_map.get(name)
             if staff_info:
                 role = staff_info["role"]
                 target = staff_info["target"]
@@ -297,20 +339,25 @@ class WaiterKPI:
                 lines.append(_format_person(p))
                 lines.append("")
 
-        # Рекомендации
+        # Рекомендации (каждое имя только один раз)
         all_rated = officials + trainees_to_show
         if all_rated:
             lines.append("═══ РЕКОМЕНДАЦИИ ═══")
+            seen_names = set()
             for p in sorted(all_rated, key=lambda x: x["total_revenue"], reverse=True):
+                surname = p["name"].split()[0]
+                if surname in seen_names:
+                    continue
+                seen_names.add(surname)
                 if p["status"] == "🟢" or p["status"] == "🏆":
-                    lines.append(f"💡 {p['name'].split()[0]}: отличный темп, сохранять")
+                    lines.append(f"💡 {surname}: отличный темп, сохранять")
                 elif p["status"] == "🟡":
                     if p["avg_check"] > avg_team_check * 1.1:
-                        lines.append(f"💡 {p['name'].split()[0]}: средний чек выше всех ({_fmt_money_full(p['avg_check'])}) — научить этому других")
+                        lines.append(f"💡 {surname}: средний чек выше всех ({_fmt_money_full(p['avg_check'])}) — научить этому других")
                     else:
-                        lines.append(f"💡 {p['name'].split()[0]}: на уровне, можно ускориться")
+                        lines.append(f"💡 {surname}: на уровне, можно ускориться")
                 elif p["status"] == "🔴":
-                    lines.append(f"💡 {p['name'].split()[0]}: отстаёт — проверить график смен")
+                    lines.append(f"💡 {surname}: отстаёт — проверить график смен")
 
         return "\n".join(lines)
 

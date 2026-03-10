@@ -66,8 +66,9 @@ STAFF_ROLES = {
     "Кулиш Ярослава": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
     "Пыстина Дарья": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
 
-    # Администратор — показывать отдельно, НЕ в рейтинге конкурса
+    # Администраторы — показывать отдельно, НЕ в рейтинге конкурса
     "Гайсина Альбина Н.": {"role": "admin_service", "target": TRAINEE_MONTHLY_TARGET},
+    "Савченко Татьяна": {"role": "admin_service", "target": TRAINEE_MONTHLY_TARGET},
 }
 
 # Исключить полностью из KPI (не обслуживают зал)
