@@ -27,11 +27,13 @@ from config import (
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
     GOOGLE_SHEET_ID,
     YANDEX_EDA_CLIENT_ID, YANDEX_EDA_CLIENT_SECRET,
+    STAFF_ROLES, KPI_EXCLUDED, TRAINEE_MONTHLY_TARGET,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
 from yandex_eda_client import YandexEdaClient
 from forecast import LoadForecaster
+from waiter_kpi import WaiterKPI
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -69,6 +71,17 @@ else:
 
 # Прогнозирование
 forecaster = LoadForecaster()
+
+# KPI официантов
+waiter_kpi = None
+if iiko_server:
+    waiter_kpi = WaiterKPI(
+        iiko_server=iiko_server,
+        staff_roles=STAFF_ROLES,
+        excluded=KPI_EXCLUDED,
+        default_target=TRAINEE_MONTHLY_TARGET,
+    )
+    logger.info("KPI официантов: подключён")
 
 
 # ─── Google Sheets ────────────────────────────────────────
@@ -353,6 +366,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /setsheet — привязать таблицу зарплат\n"
         "  /sheet — текущая таблица\n"
         "  /abc — ABC-анализ блюд\n\n"
+        "🏆 *KPI официантов*\n"
+        "  /kpi — месячный прогресс\n"
+        "  /kpi week — недельный\n"
+        "  /kpi day — дневной рейтинг\n"
+        "  /race — гонка к цели\n\n"
         "🔮 *Прогноз*\n"
         "  /forecast — прогноз на сегодня/завтра\n"
         "  /forecast\\_week — прогноз на неделю\n"
@@ -1910,6 +1928,54 @@ def _parse_multi_periods(question: str):
     return None
 
 
+async def cmd_kpi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """KPI официантов: /kpi, /kpi week, /kpi day, /kpi Калмыков"""
+    if not check_access(update.effective_user.id):
+        return
+    if not waiter_kpi:
+        await update.message.reply_text("⚠️ KPI недоступен — локальный сервер не настроен.")
+        return
+
+    args = context.args
+    msg = await update.message.reply_text("📊 Загружаю KPI...")
+
+    try:
+        if not args:
+            text = await waiter_kpi.format_kpi_monthly()
+        elif args[0].lower() in ("week", "неделя"):
+            text = await waiter_kpi.format_kpi_weekly()
+        elif args[0].lower() in ("day", "today", "yesterday", "вчера", "сегодня", "день"):
+            from datetime import date as _date
+            if args[0].lower() in ("today", "сегодня"):
+                target = datetime.now()
+            else:
+                target = datetime.now() - timedelta(days=1)
+            text = await waiter_kpi.format_kpi_daily(target)
+        else:
+            name = " ".join(args)
+            text = await waiter_kpi.format_kpi_person(name)
+
+        await _safe_send(msg, text, update)
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка KPI: {e}")
+
+
+async def cmd_race(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Гонка к цели — визуальный рейтинг"""
+    if not check_access(update.effective_user.id):
+        return
+    if not waiter_kpi:
+        await update.message.reply_text("⚠️ KPI недоступен — локальный сервер не настроен.")
+        return
+
+    msg = await update.message.reply_text("🏁 Загружаю гонку...")
+    try:
+        text = await waiter_kpi.format_race()
+        await _safe_send(msg, text, update)
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not check_access(update.effective_user.id):
         keyboard = InlineKeyboardMarkup([
@@ -1944,10 +2010,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     is_forecast_query = any(kw in q_lower for kw in forecast_keywords)
 
+    # Определяем KPI-запрос
+    kpi_keywords = [
+        "kpi", "кпи", "план", "цел", "миллион", "гонк", "race",
+        "рейтинг официант", "конкурс", "кто лидер", "кто отстаёт",
+        "прогресс", "выполнит план", "дотянет",
+    ]
+    is_kpi_query = any(kw in q_lower for kw in kpi_keywords)
+
     msg = await update.message.reply_text(
-        "🔮 Строю прогноз..." if is_forecast_query else "🤔 Анализирую..."
+        "🔮 Строю прогноз..." if is_forecast_query
+        else "📊 Загружаю KPI..." if is_kpi_query
+        else "🤔 Анализирую..."
     )
     try:
+        # KPI-запросы — данные WaiterKPI + Claude
+        if is_kpi_query and waiter_kpi:
+            kpi_text = await waiter_kpi.format_kpi_monthly()
+            analysis = claude.analyze(
+                question,
+                f"═══ KPI ОФИЦИАНТОВ ═══\n{kpi_text}\n═══════════════════════",
+            )
+            await _safe_send(msg, analysis, update)
+            return
+
         # Прогнозные запросы — подмешиваем данные прогноза
         if is_forecast_query and iiko_server:
             history = await _ensure_forecast_data()
@@ -2041,10 +2127,18 @@ async def send_morning_report(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Прогноз для утреннего отчёта: {e}")
 
+        # KPI-блок
+        kpi_block = ""
+        if waiter_kpi:
+            try:
+                kpi_block = "\n\n" + await waiter_kpi.format_morning_kpi()
+            except Exception as e:
+                logger.warning(f"KPI для утреннего отчёта: {e}")
+
         analysis = claude.analyze(
             "Утренний брифинг: итоги вчера (зал + доставка), стоп-лист, на что обратить внимание. "
-            "Также есть прогноз на сегодня — включи его в отчёт.",
-            data + forecast_block
+            "Также есть прогноз на сегодня и прогресс KPI официантов — включи всё в отчёт.",
+            data + forecast_block + kpi_block
         )
         await context.bot.send_message(ADMIN_CHAT_ID, f"☀️ *Утренний отчёт*\n\n{analysis}", parse_mode="Markdown")
     except Exception as e:
@@ -2086,6 +2180,8 @@ async def post_init(application: Application):
         BotCommand("forecast", "Прогноз на сегодня/завтра"),
         BotCommand("forecast_week", "Прогноз на неделю"),
         BotCommand("staff_plan", "План персонала на неделю"),
+        BotCommand("kpi", "KPI официантов"),
+        BotCommand("race", "Гонка к цели"),
         BotCommand("users", "Список пользователей (админ)"),
         BotCommand("revoke", "Забрать доступ (админ)"),
     ])
@@ -2125,6 +2221,8 @@ def main():
     app.add_handler(CommandHandler("forecast", cmd_forecast))
     app.add_handler(CommandHandler("forecast_week", cmd_forecast_week))
     app.add_handler(CommandHandler("staff_plan", cmd_staff_plan))
+    app.add_handler(CommandHandler("kpi", cmd_kpi))
+    app.add_handler(CommandHandler("race", cmd_race))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CallbackQueryHandler(callback_handler))

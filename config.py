@@ -49,6 +49,30 @@ COOK_ROLE_CODES = [x.strip().lower() for x in _cook_roles.split(",") if x.strip(
 YANDEX_EDA_CLIENT_ID = os.getenv("YANDEX_EDA_CLIENT_ID", "")
 YANDEX_EDA_CLIENT_SECRET = os.getenv("YANDEX_EDA_CLIENT_SECRET", "")
 
+# ─── KPI официантов ─────────────────────────────────────
+
+WAITER_MONTHLY_TARGET = int(os.getenv("WAITER_MONTHLY_TARGET", "1000000"))
+TRAINEE_MONTHLY_TARGET = int(os.getenv("TRAINEE_MONTHLY_TARGET", "300000"))
+
+# Роли сотрудников для KPI
+STAFF_ROLES = {
+    # Официанты — цель 1 000 000 руб/мес
+    "Калмыков Альберт": {"role": "official", "target": WAITER_MONTHLY_TARGET},
+
+    # Стажёры — цель 300 000 руб/мес
+    "Федорахина Дарина": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
+    "Болдакова Анастасия": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
+    "Казакова Варвара": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
+    "Кулиш Ярослава": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
+    "Пыстина Дарья": {"role": "trainee", "target": TRAINEE_MONTHLY_TARGET},
+
+    # Администратор — показывать отдельно, НЕ в рейтинге конкурса
+    "Гайсина Альбина Н.": {"role": "admin_service", "target": TRAINEE_MONTHLY_TARGET},
+}
+
+# Исключить полностью из KPI (не обслуживают зал)
+KPI_EXCLUDED = ["Афанасьев Виктор", "Яковлев Михаил", "Стаховский Сергей", "denvic"]
+
 # ─── Google Sheets (зарплаты) ─────────────────────────────
 
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
