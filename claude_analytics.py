@@ -6,6 +6,7 @@ Claude AI аналитик для данных iiko
 import anthropic
 import logging
 from datetime import datetime
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +59,15 @@ SYSTEM_PROMPT = """Ты — AI-аналитик ресторана, интегр
 
 
 class ClaudeAnalytics:
-    """Аналитик на базе Claude для данных iiko"""
+    """Аналитик на базе OpenAI (основной) + Claude (резерв) для данных iiko"""
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514",
+                 openai_api_key: str = "", openai_model: str = "gpt-4o"):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
+        self.openai_api_key = openai_api_key
+        self.openai_model = openai_model
+        self.openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 
     def analyze(self, question: str, iiko_data: str, dish_names: list = None) -> str:
         """
@@ -102,6 +107,37 @@ class ClaudeAnalytics:
             f"НЕ ГОВОРИ что данных нет или они отсутствуют — они перед тобой."
         )
 
+        # Сначала пробуем OpenAI (основной AI)
+        if self.openai_client:
+            try:
+                return self._call_openai(system, user_message)
+            except Exception as e:
+                logger.warning(f"OpenAI ошибка, переключаюсь на Claude: {e}")
+
+        # Фолбэк на Claude (резервный AI)
+        return self._call_claude(system, user_message, is_fallback=bool(self.openai_client))
+
+    def _call_openai(self, system: str, user_message: str) -> str:
+        """Вызов OpenAI API"""
+        # Для o1/o3 моделей используем role "developer" вместо "system"
+        model_lower = self.openai_model.lower()
+        if model_lower.startswith("o1") or model_lower.startswith("o3"):
+            system_role = "developer"
+        else:
+            system_role = "system"
+
+        response = self.openai_client.chat.completions.create(
+            model=self.openai_model,
+            max_tokens=2000,
+            messages=[
+                {"role": system_role, "content": system},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        return response.choices[0].message.content
+
+    def _call_claude(self, system: str, user_message: str, is_fallback: bool = False) -> str:
+        """Вызов Claude API (резервный)"""
         try:
             response = self.client.messages.create(
                 model=self.model,
@@ -111,7 +147,10 @@ class ClaudeAnalytics:
                     {"role": "user", "content": user_message}
                 ]
             )
-            return response.content[0].text
+            text = response.content[0].text
+            if is_fallback:
+                text = "⚡ Ответ от резервного AI\n\n" + text
+            return text
         except anthropic.APIError as e:
             logger.error(f"Claude API ошибка: {e}")
             return f"⚠️ Ошибка AI-аналитики: {e.message}"

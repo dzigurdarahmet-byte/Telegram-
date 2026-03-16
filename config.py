@@ -12,6 +12,8 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 IIKO_API_LOGIN = os.getenv("IIKO_API_LOGIN", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # ─── Локальный iikoServer ──────────────────────────────────
 
@@ -72,7 +74,7 @@ STAFF_ROLES = {
 }
 
 # Исключить полностью из KPI (не обслуживают зал)
-KPI_EXCLUDED = ["Афанасьев Виктор", "Яковлев Михаил", "Стаховский Сергей", "denvic"]
+KPI_EXCLUDED = ["Афанасьев Виктор", "Яковлев Михаил", "Стаховский Сергей", "denvic", "Чеботарь"]
 
 # ─── Google Sheets (зарплаты) ─────────────────────────────
 

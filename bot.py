@@ -22,6 +22,7 @@ from iiko_server_client import IikoServerClient
 from claude_analytics import ClaudeAnalytics
 from config import (
     TELEGRAM_BOT_TOKEN, IIKO_API_LOGIN, ANTHROPIC_API_KEY,
+    OPENAI_API_KEY, OPENAI_MODEL,
     ALLOWED_USERS, ADMIN_USERS, ADMIN_CHAT_ID, APPROVED_USERS,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
@@ -44,7 +45,11 @@ logger = logging.getLogger(__name__)
 # ─── Инициализация ─────────────────────────────────────────
 
 iiko_cloud = IikoClient(api_login=IIKO_API_LOGIN)
-claude = ClaudeAnalytics(api_key=ANTHROPIC_API_KEY)
+claude = ClaudeAnalytics(
+    api_key=ANTHROPIC_API_KEY,
+    openai_api_key=OPENAI_API_KEY,
+    openai_model=OPENAI_MODEL,
+)
 
 # Локальный сервер (опционально)
 iiko_server = None
@@ -2001,8 +2006,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Определяем, спрашивают ли про прогноз/планирование
+    # Перехват стоп-листа — напрямую, без AI
     q_lower = question.lower()
+    stop_keywords = ["стоп лист", "стоп-лист", "стоплист", "что в стопе", "что в стоп"]
+    if any(kw in q_lower for kw in stop_keywords):
+        msg = await update.message.reply_text("⏳ Загружаю стоп-лист...")
+        try:
+            text = await get_stop_list_text()
+            await _send_long_text(msg, text, update)
+        except Exception as e:
+            await msg.edit_text(f"⚠️ Ошибка: {e}")
+        return
+
+    # Перехват меню — напрямую, без AI
+    menu_keywords = {
+        "меню бара": "bar",
+        "меню кухни": "kitchen",
+        "полное меню": "full",
+        "покажи меню": "full",
+    }
+    for kw, view in menu_keywords.items():
+        if kw in q_lower:
+            label = "меню бара" if view == "bar" else "меню кухни" if view == "kitchen" else "меню"
+            msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
+            try:
+                data = await iiko_cloud.get_menu_summary(view)
+                await _send_long_text(msg, data, update)
+            except Exception as e:
+                await msg.edit_text(f"⚠️ Ошибка: {e}")
+            return
+
+    # Определяем, спрашивают ли про прогноз/планирование
     forecast_keywords = [
         "прогноз", "forecast", "ожидать", "планир", "смен",
         "сколько официант", "сколько повар", "нужно персонал",
