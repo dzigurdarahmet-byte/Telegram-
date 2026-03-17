@@ -95,6 +95,109 @@ if iiko_server:
 
 data_cache = DataCache(max_entries=200)
 
+# ─── Inline-кнопки (контекстная навигация) ───────────────
+
+INLINE_BUTTONS = {
+    "today": [
+        ("📊 Вчера", "report:yesterday"),
+        ("📈 За неделю", "report:week"),
+        ("🔮 Прогноз", "report:forecast"),
+    ],
+    "yesterday": [
+        ("📊 Сегодня", "report:today"),
+        ("📈 За неделю", "report:week"),
+        ("🔄 vs позавчера", "compare:yesterday_vs_before"),
+    ],
+    "week": [
+        ("📊 За месяц", "report:month"),
+        ("📋 ABC-анализ", "report:abc"),
+        ("🔄 Прошлая неделя", "report:prev_week"),
+    ],
+    "month": [
+        ("📋 ABC-анализ", "report:abc"),
+        ("👥 Сотрудники", "report:staff"),
+        ("🔄 vs прошлый год", "compare:yoy"),
+    ],
+    "stop": [
+        ("🍷 Стоп бара", "stop:bar"),
+        ("🍽️ Стоп кухни", "stop:kitchen"),
+        ("🟡 Ограничения", "stop:limits"),
+        ("📋 Полное меню", "menu:full"),
+    ],
+    "stop_bar": [
+        ("🍽️ Стоп кухни", "stop:kitchen"),
+        ("🚫 Полный стоп", "stop:full"),
+        ("🍷 Меню бара", "menu:bar"),
+    ],
+    "stop_kitchen": [
+        ("🍷 Стоп бара", "stop:bar"),
+        ("🚫 Полный стоп", "stop:full"),
+        ("🍽️ Меню кухни", "menu:kitchen"),
+    ],
+    "menu": [
+        ("🚫 Стоп-лист", "stop:full"),
+        ("🍷 Меню бара", "menu:bar"),
+        ("🍽️ Меню кухни", "menu:kitchen"),
+    ],
+    "staff": [
+        ("🏆 KPI", "report:kpi"),
+        ("🏁 Гонка", "report:race"),
+        ("👨‍🍳 Повара", "report:cooks"),
+    ],
+    "abc": [
+        ("📊 За месяц", "report:month"),
+        ("📈 За неделю", "report:week"),
+        ("👥 Сотрудники", "report:staff"),
+    ],
+    "kpi": [
+        ("📅 KPI за неделю", "kpi:week"),
+        ("📊 KPI за день", "kpi:day"),
+        ("🏁 Гонка", "report:race"),
+    ],
+    "race": [
+        ("🏆 Полный KPI", "report:kpi"),
+        ("📅 KPI за неделю", "kpi:week"),
+        ("👥 Сотрудники", "report:staff"),
+    ],
+    "cooks": [
+        ("👨‍🍳 За месяц", "cooks:month"),
+        ("📊 Зарплаты", "report:sheet"),
+        ("📈 За неделю", "report:week"),
+    ],
+    "forecast": [
+        ("📅 На неделю", "report:forecast_week"),
+        ("👥 План персонала", "report:staff_plan"),
+        ("📊 Сегодня", "report:today"),
+    ],
+    "forecast_week": [
+        ("🔮 На сегодня/завтра", "report:forecast"),
+        ("👥 План персонала", "report:staff_plan"),
+    ],
+    "staff_plan": [
+        ("🔮 Прогноз", "report:forecast"),
+        ("📅 На неделю", "report:forecast_week"),
+    ],
+    "free_question": [
+        ("📊 Сегодня", "report:today"),
+        ("📊 Вчера", "report:yesterday"),
+        ("🚫 Стоп-лист", "stop:full"),
+    ],
+    "diag": [
+        ("💾 Кэш", "report:cache"),
+        ("📡 Мониторинг", "report:monitor"),
+    ],
+}
+
+
+def _build_inline_keyboard(context_key: str):
+    """Создать inline-клавиатуру по контексту отчёта."""
+    buttons_config = INLINE_BUTTONS.get(context_key)
+    if not buttons_config:
+        return None
+    buttons = [InlineKeyboardButton(text, callback_data=cb) for text, cb in buttons_config]
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
+
 # ─── Google Sheets ────────────────────────────────────────
 
 _sheet_id = GOOGLE_SHEET_ID  # из .env, можно переопределить через /setsheet
@@ -416,28 +519,32 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def _safe_send(msg, text: str, update: Update = None):
-    """Отправить текст, разбивая длинные сообщения и обрабатывая ошибки Markdown"""
+async def _safe_send(msg, text: str, update: Update = None, context_key: str = ""):
+    """Отправить текст, разбивая длинные сообщения. К последнему добавить inline-кнопки."""
     if not text or not text.strip():
         text = "⚠️ AI вернул пустой ответ. Попробуйте переформулировать вопрос."
+
+    keyboard = _build_inline_keyboard(context_key) if context_key else None
+
     if len(text) > 4000:
         parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
     else:
         parts = [text]
 
     for i, part in enumerate(parts):
+        is_last = (i == len(parts) - 1)
+        reply_markup = keyboard if (is_last and keyboard) else None
         try:
             if i == 0:
-                await msg.edit_text(part, parse_mode="Markdown")
+                await msg.edit_text(part, parse_mode="Markdown", reply_markup=reply_markup)
             elif update:
-                await update.message.reply_text(part, parse_mode="Markdown")
+                await update.message.reply_text(part, parse_mode="Markdown", reply_markup=reply_markup)
         except Exception:
-            # Фолбэк без Markdown если парсинг не удался
             try:
                 if i == 0:
-                    await msg.edit_text(part)
+                    await msg.edit_text(part, reply_markup=reply_markup)
                 elif update:
-                    await update.message.reply_text(part)
+                    await update.message.reply_text(part, reply_markup=reply_markup)
             except Exception as e:
                 logger.error(f"_safe_send: не удалось отправить сообщение: {e}")
 
@@ -457,7 +564,7 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
         )
         dish_names = _extract_dish_names(data)
         analysis = claude.analyze(question, data, dish_names=dish_names)
-        await _safe_send(msg, analysis, update)
+        await _safe_send(msg, analysis, update, context_key=period)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -505,7 +612,7 @@ async def cmd_today(update, context):
             "Полная сводка за сегодня: выручка по залу и доставке отдельно, средний чек, топ блюд",
             data, dish_names=dish_names
         )
-        await _safe_send(msg, analysis, update)
+        await _safe_send(msg, analysis, update, context_key="today")
 
     await _send_yoy_chart(update, "today")
 
@@ -529,9 +636,12 @@ async def _stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not check_access(update.effective_user.id):
         return
     cache_key = f"stop_list:{view}"
+    context_map = {"full": "stop", "bar": "stop_bar", "kitchen": "stop_kitchen", "limits": "stop", "stop": "stop"}
+    ctx = context_map.get(view, "stop")
+    keyboard = _build_inline_keyboard(ctx)
     cached = data_cache.get(cache_key)
     if cached is not None:
-        await update.message.reply_text(cached)
+        await update.message.reply_text(cached, reply_markup=keyboard)
         return
     msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
     try:
@@ -543,7 +653,12 @@ async def _stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         if not data.startswith("⚠️"):
             data_cache.set(cache_key, data, TTL_STOP_LIST)
-        await msg.edit_text(data)
+        if len(data) > 4000:
+            await _send_long_text(msg, data, update)
+            if keyboard:
+                await update.message.reply_text("👆 Что дальше?", reply_markup=keyboard)
+        else:
+            await msg.edit_text(data, reply_markup=keyboard)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -594,16 +709,21 @@ async def _menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if not check_access(update.effective_user.id):
         return
     cache_key = f"menu:{view}"
+    keyboard = _build_inline_keyboard("menu")
     cached = data_cache.get(cache_key)
     if cached is not None:
         msg = await update.message.reply_text("⏳ Загружаю...")
         await _send_long_text(msg, cached, update)
+        if keyboard:
+            await update.message.reply_text("👆 Что дальше?", reply_markup=keyboard)
         return
     msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
     try:
         data = await iiko_cloud.get_menu_summary(view)
         data_cache.set(cache_key, data, TTL_MENU)
         await _send_long_text(msg, data, update)
+        if keyboard:
+            await update.message.reply_text("👆 Что дальше?", reply_markup=keyboard)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -637,7 +757,7 @@ async def cmd_staff(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Покажи: кто лучший, кто отстаёт, средний чек на сотрудника, рекомендации.",
             data
         )
-        await _safe_send(msg, analysis, update)
+        await _safe_send(msg, analysis, update, context_key="staff")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -654,7 +774,7 @@ async def cmd_abc(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Рекомендации: что убрать, что продвигать. Учти и зал, и доставку.",
             data
         )
-        await _safe_send(msg, analysis, update)
+        await _safe_send(msg, analysis, update, context_key="abc")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -776,7 +896,7 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "какие дни самые прибыльные/убыточные",
             full_data
         )
-        await _safe_send(msg, analysis, update)
+        await _safe_send(msg, analysis, update, context_key="cooks")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -924,7 +1044,7 @@ async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts.append(forecaster.format_forecast(fc, staff))
 
         text = "\n\n" + ("═" * 35) + "\n\n"
-        await _safe_send(msg, text.join(parts), update)
+        await _safe_send(msg, text.join(parts), update, context_key="forecast")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -956,7 +1076,7 @@ async def cmd_forecast_week(update: Update, context: ContextTypes.DEFAULT_TYPE):
             staffs.append(st)
 
         text = forecaster.format_week_forecast(forecasts, staffs)
-        await _safe_send(msg, text, update)
+        await _safe_send(msg, text, update, context_key="forecast_week")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -988,12 +1108,337 @@ async def cmd_staff_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             staffs.append(st)
 
         text = forecaster.format_staff_plan(forecasts, staffs)
-        await _safe_send(msg, text, update)
+        await _safe_send(msg, text, update, context_key="staff_plan")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
 # ─── Регистрация пользователей ────────────────────────────
+
+async def _inline_edit_or_reply(query, text, keyboard=None, parse_mode="Markdown"):
+    """Попытаться edit_message_text, при ошибке — reply."""
+    try:
+        await query.edit_message_text(text, parse_mode=parse_mode, reply_markup=keyboard)
+    except Exception:
+        try:
+            await query.edit_message_text(text, reply_markup=keyboard)
+        except Exception:
+            try:
+                await query.message.reply_text(text, reply_markup=keyboard)
+            except Exception as e:
+                logger.error(f"Inline callback send error: {e}")
+
+
+async def _inline_report(query, context, period, question):
+    """Обработать нажатие кнопки отчёта"""
+    _, _, label = _get_period_dates(period)
+    await query.edit_message_text(f"⏳ Загружаю данные ({label})...")
+    try:
+        data = await get_combined_data(period)
+        data = "\n".join(
+            line for line in data.split("\n")
+            if not any(name in line for name in EXCLUDED_STAFF)
+        )
+        dish_names = _extract_dish_names(data)
+        analysis = claude.analyze(question, data, dish_names=dish_names)
+        keyboard = _build_inline_keyboard(period)
+        await _inline_edit_or_reply(query, analysis, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_report_dates(query, context, period_name):
+    """Отчёт за именованный период (прошлая неделя и т.д.)"""
+    today = datetime.now()
+    if period_name == "prev_week":
+        weekday = today.weekday()
+        this_monday = today - timedelta(days=weekday)
+        prev_monday = this_monday - timedelta(days=7)
+        prev_sunday = this_monday - timedelta(days=1)
+        date_from = prev_monday.strftime("%Y-%m-%d")
+        date_to = prev_sunday.strftime("%Y-%m-%d")
+        label = "Прошлая неделя"
+    else:
+        return
+    await query.edit_message_text(f"⏳ Загружаю данные ({label})...")
+    try:
+        data = await get_combined_data_by_dates(date_from, date_to, label)
+        data = "\n".join(
+            line for line in data.split("\n")
+            if not any(name in line for name in EXCLUDED_STAFF)
+        )
+        analysis = claude.analyze(f"Отчёт за {label}", data)
+        keyboard = _build_inline_keyboard("week")
+        await _inline_edit_or_reply(query, analysis, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_compare(query, context, question):
+    """Сравнение периодов"""
+    await query.edit_message_text("⏳ Сравниваю периоды...")
+    try:
+        multi = _parse_multi_periods(question)
+        if multi and iiko_server and len(multi) >= 2:
+            parts = []
+            for date_from, date_to, label in multi:
+                try:
+                    s = await iiko_server.get_sales_summary(date_from, date_to)
+                    parts.append(f"═══ ПЕРИОД: {label} ({date_from} — {date_to}) ═══\n{s}")
+                except Exception as exc:
+                    parts.append(f"═══ ПЕРИОД: {label} ═══\n⚠️ {exc}")
+            data = "\n\n".join(parts)
+        else:
+            data = await get_combined_data("week")
+        analysis = claude.analyze(question, data)
+        keyboard = _build_inline_keyboard("week")
+        await _inline_edit_or_reply(query, analysis, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_stop(query, context, view):
+    """Стоп-лист по кнопке"""
+    labels = {"full": "стоп-лист", "bar": "стоп бара", "kitchen": "стоп кухни", "limits": "ограничения"}
+    label = labels.get(view, "стоп-лист")
+    cache_key = f"stop_list:{view}"
+    context_map = {"full": "stop", "bar": "stop_bar", "kitchen": "stop_kitchen", "limits": "stop"}
+    keyboard = _build_inline_keyboard(context_map.get(view, "stop"))
+
+    cached = data_cache.get(cache_key)
+    if cached is not None:
+        await _inline_edit_or_reply(query, cached, keyboard, parse_mode=None)
+        return
+
+    await query.edit_message_text(f"⏳ Загружаю {label}...")
+    try:
+        extra = {}
+        if iiko_server:
+            extra = await iiko_server.get_products()
+        data = await iiko_cloud.get_stop_list_summary(extra_products=extra, view=view)
+        if not data.startswith("⚠️"):
+            data_cache.set(cache_key, data, TTL_STOP_LIST)
+        if len(data) > 4000:
+            await query.edit_message_text(data[:4000])
+            await query.message.reply_text(data[4000:], reply_markup=keyboard)
+        else:
+            await query.edit_message_text(data, reply_markup=keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_menu(query, context, view):
+    """Меню по кнопке"""
+    labels = {"full": "меню", "bar": "меню бара", "kitchen": "меню кухни"}
+    label = labels.get(view, "меню")
+    keyboard = _build_inline_keyboard("menu")
+    cache_key = f"menu:{view}"
+
+    cached = data_cache.get(cache_key)
+    if cached is not None:
+        if len(cached) > 4000:
+            await query.edit_message_text(cached[:4000])
+            await query.message.reply_text(cached[4000:8000], reply_markup=keyboard)
+        else:
+            await query.edit_message_text(cached, reply_markup=keyboard)
+        return
+
+    await query.edit_message_text(f"⏳ Загружаю {label}...")
+    try:
+        data = await iiko_cloud.get_menu_summary(view)
+        data_cache.set(cache_key, data, TTL_MENU)
+        if len(data) > 4000:
+            await query.edit_message_text(data[:4000])
+            await query.message.reply_text(data[4000:8000], reply_markup=keyboard)
+        else:
+            await query.edit_message_text(data, reply_markup=keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_kpi(query, context, sub):
+    """KPI по кнопке"""
+    if not waiter_kpi:
+        await query.edit_message_text("⚠️ KPI недоступен — локальный сервер не настроен.")
+        return
+    await query.edit_message_text("📊 Загружаю KPI...")
+    try:
+        if sub == "week":
+            text = await waiter_kpi.format_kpi_weekly()
+        elif sub == "day":
+            target = datetime.now() - timedelta(days=1)
+            text = await waiter_kpi.format_kpi_daily(target)
+        else:
+            text = await waiter_kpi.format_kpi_monthly()
+        keyboard = _build_inline_keyboard("kpi")
+        await _inline_edit_or_reply(query, text, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_race(query, context):
+    if not waiter_kpi:
+        await query.edit_message_text("⚠️ KPI недоступен.")
+        return
+    await query.edit_message_text("🏁 Загружаю гонку...")
+    try:
+        text = await waiter_kpi.format_race()
+        keyboard = _build_inline_keyboard("race")
+        await _inline_edit_or_reply(query, text, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_cooks(query, context, period):
+    await query.edit_message_text("⏳ Загружаю отчёт по кухне...")
+    try:
+        date_from, date_to, label = _get_period_dates(period)
+        parts = []
+        sheet_salary = 0
+        sheet_cooks = 0
+        if _sheet_id:
+            try:
+                salary_cache_key = f"salary:{_sheet_id}"
+                salary_data = data_cache.get(salary_cache_key)
+                if salary_data is None:
+                    salary_data = await fetch_salary_data(_sheet_id, section="Повар")
+                    if not salary_data.get("error"):
+                        data_cache.set(salary_cache_key, salary_data, TTL_SALARY)
+                parts.append(format_salary_summary(salary_data))
+                if salary_data.get("avg_daily_salary", 0) > 0:
+                    sheet_salary = salary_data["avg_daily_salary"]
+                    sheet_cooks = salary_data.get("count", 0)
+            except Exception as e:
+                parts.append(f"⚠️ Google Sheets: {e}")
+        if iiko_server:
+            cook_data = await iiko_server.get_cook_productivity_summary(
+                date_from, date_to,
+                cooks_count=sheet_cooks or COOKS_PER_SHIFT,
+                cook_salary=sheet_salary or COOK_SALARY_PER_SHIFT,
+            )
+            parts.append(cook_data)
+        full_data = ("\n\n" + "═" * 40 + "\n\n").join(parts)
+        analysis = claude.analyze("Проанализируй производительность поваров кухни", full_data)
+        keyboard = _build_inline_keyboard("cooks")
+        await _inline_edit_or_reply(query, analysis, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_sheet(query, context):
+    if _sheet_id:
+        await query.edit_message_text(
+            f"📋 Текущая таблица зарплат:\n"
+            f"https://docs.google.com/spreadsheets/d/{_sheet_id}/edit"
+        )
+    else:
+        await query.edit_message_text("⚠️ Таблица не привязана. /setsheet <ссылка>")
+
+
+async def _inline_forecast(query, context):
+    await query.edit_message_text("🔮 Загружаю прогноз...")
+    try:
+        history = await _ensure_forecast_data()
+        if "error" in history:
+            await query.edit_message_text(f"⚠️ {history['error']}")
+            return
+        patterns = forecaster.analyze_patterns(history)
+        if "error" in patterns:
+            await query.edit_message_text(f"⚠️ {patterns['error']}")
+            return
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+        parts = []
+        for target in [today, tomorrow]:
+            fc = forecaster.forecast_day(target, patterns)
+            staff = forecaster.recommend_staff(fc, patterns)
+            parts.append(forecaster.format_forecast(fc, staff))
+        full = ("\n\n" + "═" * 35 + "\n\n").join(parts)
+        keyboard = _build_inline_keyboard("forecast")
+        await _inline_edit_or_reply(query, full, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_forecast_week(query, context):
+    await query.edit_message_text("🔮 Строю прогноз на неделю...")
+    try:
+        history = await _ensure_forecast_data()
+        if "error" in history:
+            await query.edit_message_text(f"⚠️ {history['error']}")
+            return
+        patterns = forecaster.analyze_patterns(history)
+        if "error" in patterns:
+            await query.edit_message_text(f"⚠️ {patterns['error']}")
+            return
+        today = datetime.now().date()
+        forecasts, staffs = [], []
+        for i in range(7):
+            target = today + timedelta(days=i)
+            fc = forecaster.forecast_day(target, patterns)
+            st = forecaster.recommend_staff(fc, patterns)
+            forecasts.append(fc)
+            staffs.append(st)
+        text = forecaster.format_week_forecast(forecasts, staffs)
+        keyboard = _build_inline_keyboard("forecast_week")
+        await _inline_edit_or_reply(query, text, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_staff_plan(query, context):
+    await query.edit_message_text("👥 Строю план персонала...")
+    try:
+        history = await _ensure_forecast_data()
+        if "error" in history:
+            await query.edit_message_text(f"⚠️ {history['error']}")
+            return
+        patterns = forecaster.analyze_patterns(history)
+        if "error" in patterns:
+            await query.edit_message_text(f"⚠️ {patterns['error']}")
+            return
+        today = datetime.now().date()
+        forecasts, staffs = [], []
+        for i in range(7):
+            target = today + timedelta(days=i)
+            fc = forecaster.forecast_day(target, patterns)
+            st = forecaster.recommend_staff(fc, patterns)
+            forecasts.append(fc)
+            staffs.append(st)
+        text = forecaster.format_staff_plan(forecasts, staffs)
+        keyboard = _build_inline_keyboard("staff_plan")
+        await _inline_edit_or_reply(query, text, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
+async def _inline_cache(query, context):
+    stats = data_cache.stats()
+    hit_rate = f"{stats['hit_rate']:.0%}"
+    await query.edit_message_text(
+        f"💾 Кэш данных\n"
+        f"  Записей: {stats['entries']}\n"
+        f"  Попаданий: {stats['hits']}\n"
+        f"  Промахов: {stats['misses']}\n"
+        f"  Hit rate: {hit_rate}"
+    )
+
+
+async def _inline_monitor(query, context):
+    if not STOP_MONITOR_ENABLED:
+        await query.edit_message_text("⚪ Мониторинг стоп-листа выключен.")
+        return
+    lines = [
+        f"📡 Мониторинг стоп-листа",
+        f"  Интервал: каждые {STOP_MONITOR_INTERVAL // 60} мин",
+    ]
+    if _stop_monitor and _stop_monitor._initialized:
+        lines.append(f"  Статус: 🟢 работает")
+        lines.append(f"  Позиций: {len(_stop_monitor._previous_state)}")
+    else:
+        lines.append(f"  Статус: ⏳ инициализация")
+    await query.edit_message_text("\n".join(lines))
+
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик всех inline-кнопок"""
@@ -1001,12 +1446,82 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data
 
+    # Система регистрации
     if data == "request_access":
         await _handle_request_access(query, context)
-    elif data.startswith("approve_"):
+        return
+    if data.startswith("approve_"):
         await _handle_approve(query, data, context)
-    elif data.startswith("reject_"):
+        return
+    if data.startswith("reject_"):
         await _handle_reject(query, data, context)
+        return
+
+    # Проверка доступа для inline-кнопок отчётов
+    if not check_access(query.from_user.id):
+        await query.edit_message_text("⛔ Нет доступа.")
+        return
+
+    # Отчёты
+    if data == "report:today":
+        await _inline_report(query, context, "today",
+            "Полная сводка за сегодня: выручка по залу и доставке, средний чек, топ блюд")
+    elif data == "report:yesterday":
+        await _inline_report(query, context, "yesterday",
+            "Полная сводка за вчера: выручка, средний чек, топ и антитоп блюд")
+    elif data == "report:week":
+        await _inline_report(query, context, "week",
+            "Подробный отчёт за неделю: динамика выручки, зал vs доставка, рекомендации")
+    elif data == "report:month":
+        await _inline_report(query, context, "month",
+            "Месячный отчёт: выручка, тренды, ABC-анализ, проблемные позиции")
+    elif data == "report:abc":
+        await _inline_report(query, context, "month",
+            "ABC-анализ блюд за месяц: категории A, B, C с рекомендациями")
+    elif data == "report:staff":
+        await _inline_report(query, context, "week",
+            "Производительность официантов и администраторов за неделю")
+    elif data == "report:prev_week":
+        await _inline_report_dates(query, context, "prev_week")
+    # Сравнения
+    elif data == "compare:yesterday_vs_before":
+        await _inline_compare(query, context, "сравни вчера и позавчера")
+    elif data == "compare:yoy":
+        await _inline_compare(query, context, "vs прошлый год")
+    # Стоп-лист
+    elif data.startswith("stop:"):
+        await _inline_stop(query, context, data.split(":")[1])
+    # Меню
+    elif data.startswith("menu:"):
+        await _inline_menu(query, context, data.split(":")[1])
+    # KPI
+    elif data == "report:kpi":
+        await _inline_kpi(query, context, None)
+    elif data == "kpi:week":
+        await _inline_kpi(query, context, "week")
+    elif data == "kpi:day":
+        await _inline_kpi(query, context, "day")
+    elif data == "report:race":
+        await _inline_race(query, context)
+    # Повара
+    elif data == "report:cooks":
+        await _inline_cooks(query, context, "week")
+    elif data == "cooks:month":
+        await _inline_cooks(query, context, "month")
+    elif data == "report:sheet":
+        await _inline_sheet(query, context)
+    # Прогноз
+    elif data == "report:forecast":
+        await _inline_forecast(query, context)
+    elif data == "report:forecast_week":
+        await _inline_forecast_week(query, context)
+    elif data == "report:staff_plan":
+        await _inline_staff_plan(query, context)
+    # Сервисные
+    elif data == "report:cache":
+        await _inline_cache(query, context)
+    elif data == "report:monitor":
+        await _inline_monitor(query, context)
 
 
 async def _handle_request_access(query, context: ContextTypes.DEFAULT_TYPE):
@@ -2103,7 +2618,7 @@ async def cmd_kpi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = " ".join(args)
             text = await waiter_kpi.format_kpi_person(name)
 
-        await _safe_send(msg, text, update)
+        await _safe_send(msg, text, update, context_key="kpi")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка KPI: {e}")
 
@@ -2119,7 +2634,7 @@ async def cmd_race(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🏁 Загружаю гонку...")
     try:
         text = await waiter_kpi.format_race()
-        await _safe_send(msg, text, update)
+        await _safe_send(msg, text, update, context_key="race")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -2208,7 +2723,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 question,
                 f"═══ KPI ОФИЦИАНТОВ ═══\n{kpi_text}\n═══════════════════════",
             )
-            await _safe_send(msg, analysis, update)
+            await _safe_send(msg, analysis, update, context_key="kpi")
             return
 
         # Прогнозные запросы — подмешиваем данные прогноза
@@ -2277,7 +2792,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         dish_names = _extract_dish_names(data)
         analysis = claude.analyze(question, data, dish_names=dish_names)
-        await _safe_send(msg, analysis, update)
+        await _safe_send(msg, analysis, update, context_key="free_question")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
