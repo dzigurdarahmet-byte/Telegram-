@@ -215,9 +215,9 @@ INLINE_BUTTONS = {
         ("👨‍🍳 Повара", "report:cooks"),
     ],
     "abc": [
+        ("💰 Food Cost", "report:foodcost"),
         ("📊 За месяц", "report:month"),
         ("📈 За неделю", "report:week"),
-        ("👥 Сотрудники", "report:staff"),
     ],
     "kpi": [
         ("📅 KPI за неделю", "kpi:week"),
@@ -1498,6 +1498,32 @@ async def _inline_cache(query, context):
     )
 
 
+async def _inline_foodcost(query, context):
+    if not iiko_server:
+        await query.edit_message_text("⚠️ Food cost недоступен — нет iiko Server.")
+        return
+    await query.edit_message_text("💰 Загружаю food cost...")
+    try:
+        from food_cost import FoodCostAnalyzer
+        date_from, date_to, _ = _get_period_dates("month")
+        analyzer = FoodCostAnalyzer(iiko_server)
+        data = await analyzer.get_food_cost_data(date_from, date_to)
+        if data.get("error"):
+            await query.edit_message_text(f"⚠️ {data['error']}")
+            return
+        dishes = analyzer.analyze(data)
+        formatted = analyzer.format_for_ai(dishes, data.get("has_cost", False))
+        prompt = (
+            "Проанализируй маржинальность блюд: food cost, топ-5 прибыльных, "
+            "ловушки (популярные но дешёвые), скрытые возможности, рекомендации."
+        )
+        analysis = claude.analyze(prompt, formatted)
+        keyboard = _build_inline_keyboard("abc")
+        await _inline_edit_or_reply(query, analysis, keyboard)
+    except Exception as e:
+        await query.edit_message_text(f"⚠️ Ошибка: {e}")
+
+
 async def _inline_alerts(query, context):
     if not ANOMALY_ALERTS_ENABLED:
         await query.edit_message_text("⚪ Алерты аномалий выключены.")
@@ -1610,6 +1636,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _inline_monitor(query, context)
     elif data == "report:alerts":
         await _inline_alerts(query, context)
+    elif data == "report:foodcost":
+        await _inline_foodcost(query, context)
 
 
 async def _handle_request_access(query, context: ContextTypes.DEFAULT_TYPE):
@@ -2990,6 +3018,99 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧹 Контекст диалога очищен. Начинаем с чистого листа.")
 
 
+async def cmd_foodcost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Анализ маржинальности блюд"""
+    if not check_access(update.effective_user.id):
+        return
+    if not iiko_server:
+        await update.message.reply_text("⚠️ Food cost недоступен — нет iiko Server.")
+        return
+
+    period = "month"
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ("week", "неделя"):
+            period = "week"
+        elif arg in ("today", "сегодня"):
+            period = "today"
+
+    date_from, date_to, label = _get_period_dates(period)
+    msg = await update.message.reply_text(f"💰 Загружаю food cost ({label})...")
+
+    try:
+        from food_cost import FoodCostAnalyzer
+        analyzer = FoodCostAnalyzer(iiko_server)
+        data = await analyzer.get_food_cost_data(date_from, date_to)
+
+        if data.get("error"):
+            await msg.edit_text(f"⚠️ {data['error']}")
+            return
+
+        dishes = analyzer.analyze(data)
+        formatted = analyzer.format_for_ai(dishes, data.get("has_cost", False))
+
+        prompt = (
+            "Проанализируй маржинальность блюд ресторана. Структура:\n"
+            "1. Общий food cost (себестоимость/выручка в %)\n"
+            "2. Топ-5 самых прибыльных блюд\n"
+            "3. Блюда-ловушки: популярные но с низкой маржой\n"
+            "4. Скрытые возможности: высокая маржа, мало продаж\n"
+            "5. Рекомендации: цены, продвижение, что убрать\n"
+            "Если себестоимость недоступна — дай рекомендации по настройке техкарт."
+        )
+
+        analysis = claude.analyze(prompt, formatted)
+        await _safe_send(msg, analysis, update, context_key="abc")
+
+        if not data.get("has_cost"):
+            await update.message.reply_text(
+                "💡 Для полного food cost анализа настройте техкарты в iiko:\n"
+                "iikoOffice → Товары и склады → Технологические карты\n\n"
+                f"Доступные поля OLAP: {', '.join(data.get('fields_available', [])[:15])}"
+            )
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_debugfoodcost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отладка: какие поля себестоимости доступны в OLAP"""
+    if not check_access(update.effective_user.id):
+        return
+    if not iiko_server:
+        await update.message.reply_text("⚠️ Нет iiko Server")
+        return
+    msg = await update.message.reply_text("🔍 Ищу поля себестоимости в OLAP...")
+    try:
+        import json as _json
+        await iiko_server._ensure_token()
+        response = await iiko_server.client.get(
+            f"{iiko_server.server_url}/resto/api/v2/reports/olap/columns",
+            params={"key": iiko_server.token, "reportType": "SALES"}
+        )
+        if response.status_code == 200:
+            data = _json.loads(response.text)
+            cost_keywords = ["cost", "себестоим", "цена закуп", "foodcost",
+                             "food_cost", "закупочн", "prime", "costprice"]
+            found = []
+            if isinstance(data, dict):
+                for field_name in sorted(data.keys()):
+                    if any(kw in field_name.lower() for kw in cost_keywords):
+                        found.append(field_name)
+            lines = ["🔍 Поля себестоимости в OLAP:"]
+            if found:
+                for f in found:
+                    lines.append(f"  ✅ {f}")
+            else:
+                lines.append("  ❌ Полей себестоимости не найдено")
+                lines.append("  Настройте техкарты в iikoOffice")
+            lines.append(f"\nВсего полей OLAP: {len(data) if isinstance(data, dict) else '?'}")
+            await msg.edit_text("\n".join(lines))
+        else:
+            await msg.edit_text(f"⚠️ OLAP columns: {response.status_code}")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Еженедельный отчёт — вручную"""
     if not check_access(update.effective_user.id):
@@ -3095,6 +3216,7 @@ async def post_init(application: Application):
         BotCommand("alerts", "Статус алертов аномалий"),
         BotCommand("clear", "Сбросить контекст диалога"),
         BotCommand("weekly", "Еженедельный отчёт"),
+        BotCommand("foodcost", "Маржинальность блюд"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -3250,6 +3372,8 @@ def main():
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CommandHandler("weekly", cmd_weekly))
+    app.add_handler(CommandHandler("foodcost", cmd_foodcost))
+    app.add_handler(CommandHandler("debugfoodcost", cmd_debugfoodcost))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
