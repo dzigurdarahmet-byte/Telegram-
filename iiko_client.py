@@ -106,7 +106,7 @@ class IikoClient:
     async def get_nomenclature(self) -> dict:
         now = datetime.now()
         if (self._nomenclature_cache and self._nomenclature_cache_time
-                and (now - self._nomenclature_cache_time).total_seconds() < 300):
+                and (now - self._nomenclature_cache_time).total_seconds() < 1800):
             return self._nomenclature_cache
         org_id = await self.get_organization_id()
         data = await self._post("/api/1/nomenclature", {

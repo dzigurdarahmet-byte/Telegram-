@@ -36,6 +36,7 @@ from charts import generate_yoy_chart
 from yandex_eda_client import YandexEdaClient
 from forecast import LoadForecaster
 from waiter_kpi import WaiterKPI
+from cache import DataCache, TTL_STOP_LIST, TTL_MENU, TTL_OLAP_HISTORICAL, TTL_OLAP_TODAY, TTL_FORECAST, TTL_SALARY
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -89,6 +90,10 @@ if iiko_server:
     )
     logger.info("KPI официантов: подключён")
 
+
+# ─── Кэш данных ──────────────────────────────────────────
+
+data_cache = DataCache(max_entries=200)
 
 # ─── Google Sheets ────────────────────────────────────────
 
@@ -179,17 +184,27 @@ def _get_period_dates(period: str):
 
 async def get_stop_list_text() -> str:
     """Получить полный стоп-лист (только стоп, без ограничений) по кухне и бару"""
+    cached = data_cache.get("stop_list:stop")
+    if cached is not None:
+        return cached
     try:
         extra = {}
         if iiko_server:
             extra = await iiko_server.get_products()
-        return await iiko_cloud.get_stop_list_summary(extra_products=extra, view="stop")
+        result = await iiko_cloud.get_stop_list_summary(extra_products=extra, view="stop")
+        if not result.startswith("⚠️"):
+            data_cache.set("stop_list:stop", result, TTL_STOP_LIST)
+        return result
     except Exception as e:
         return f"⚠️ Стоп-лист: {e}"
 
 
 async def get_combined_data(period: str) -> str:
     """Собрать данные из ВСЕХ источников (без стоп-листа — он отправляется отдельно)"""
+    cache_key = f"combined:{period}"
+    cached = data_cache.get(cache_key)
+    if cached is not None:
+        return cached
     date_from, date_to, label = _get_period_dates(period)
     parts = []
 
@@ -225,11 +240,17 @@ async def get_combined_data(period: str) -> str:
     result = separator.join(parts)
     if parts and all(p.startswith("⚠️") for p in parts):
         return "⚠️ Не удалось получить данные ни из одного источника.\n\n" + result
+    ttl = TTL_OLAP_TODAY if period == "today" else TTL_OLAP_HISTORICAL
+    data_cache.set(cache_key, result, ttl)
     return result
 
 
 async def get_combined_data_by_dates(date_from: str, date_to: str, label: str) -> str:
     """Собрать данные из ВСЕХ источников по явным датам (без стоп-листа)"""
+    cache_key = f"combined_dates:{date_from}:{date_to}"
+    cached = data_cache.get(cache_key)
+    if cached is not None:
+        return cached
     parts = []
 
     # 1. Данные доставки
@@ -250,7 +271,12 @@ async def get_combined_data_by_dates(date_from: str, date_to: str, label: str) -
             parts.append(f"⚠️ Зал: {e}")
 
     separator = "\n\n" + "═" * 40 + "\n\n"
-    return separator.join(parts)
+    result = separator.join(parts)
+    is_today = date_to == datetime.now().strftime("%Y-%m-%d")
+    ttl = TTL_OLAP_TODAY if is_today else TTL_OLAP_HISTORICAL
+    if not all(p.startswith("⚠️") for p in parts):
+        data_cache.set(cache_key, result, ttl)
+    return result
 
 
 async def get_yoy_totals(period: str) -> tuple:
@@ -502,6 +528,11 @@ async def _stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
     """Общий обработчик для всех команд стоп-листа"""
     if not check_access(update.effective_user.id):
         return
+    cache_key = f"stop_list:{view}"
+    cached = data_cache.get(cache_key)
+    if cached is not None:
+        await update.message.reply_text(cached)
+        return
     msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
     try:
         extra = {}
@@ -510,6 +541,8 @@ async def _stop_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
         data = await iiko_cloud.get_stop_list_summary(
             extra_products=extra, view=view
         )
+        if not data.startswith("⚠️"):
+            data_cache.set(cache_key, data, TTL_STOP_LIST)
         await msg.edit_text(data)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -560,9 +593,16 @@ async def _menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE,
                         view: str, label: str):
     if not check_access(update.effective_user.id):
         return
+    cache_key = f"menu:{view}"
+    cached = data_cache.get(cache_key)
+    if cached is not None:
+        msg = await update.message.reply_text("⏳ Загружаю...")
+        await _send_long_text(msg, cached, update)
+        return
     msg = await update.message.reply_text(f"⏳ Загружаю {label}...")
     try:
         data = await iiko_cloud.get_menu_summary(view)
+        data_cache.set(cache_key, data, TTL_MENU)
         await _send_long_text(msg, data, update)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -687,7 +727,12 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sheet_cooks = 0
         if _sheet_id:
             try:
-                salary_data = await fetch_salary_data(_sheet_id, section="Повар")
+                salary_cache_key = f"salary:{_sheet_id}"
+                salary_data = data_cache.get(salary_cache_key)
+                if salary_data is None:
+                    salary_data = await fetch_salary_data(_sheet_id, section="Повар")
+                    if not salary_data.get("error"):
+                        data_cache.set(salary_cache_key, salary_data, TTL_SALARY)
                 parts.append(format_salary_summary(salary_data))
                 if salary_data.get("avg_daily_salary", 0) > 0:
                     sheet_salary = salary_data["avg_daily_salary"]
@@ -834,8 +879,13 @@ async def cmd_debugstop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _ensure_forecast_data() -> dict:
     """Загрузить или обновить исторические данные для прогноза"""
+    cached = data_cache.get("forecast:history")
+    if cached is not None:
+        return cached
+
     history = forecaster.load_history()
     if history.get("day_rows"):
+        data_cache.set("forecast:history", history, TTL_FORECAST)
         return history
 
     if not iiko_server:
@@ -844,6 +894,7 @@ async def _ensure_forecast_data() -> dict:
     history = await iiko_server.get_historical_data(weeks_back=8)
     if history.get("day_rows"):
         forecaster.save_history(history)
+        data_cache.set("forecast:history", history, TTL_FORECAST)
     return history
 
 
@@ -2282,6 +2333,44 @@ async def send_evening_report(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Вечерний отчёт ошибка: {e}")
 
 
+# ─── Кэш: команды ────────────────────────────────────────
+
+
+async def cmd_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика кэша"""
+    if not check_access(update.effective_user.id):
+        return
+    import time as _time
+    stats = data_cache.stats()
+    hit_rate = f"{stats['hit_rate']:.0%}"
+    lines = [
+        "💾 Кэш данных",
+        f"  Записей: {stats['entries']}",
+        f"  Попаданий: {stats['hits']}",
+        f"  Промахов: {stats['misses']}",
+        f"  Hit rate: {hit_rate}",
+    ]
+    if stats['entries'] > 0:
+        lines.append("")
+        lines.append("  Ключи:")
+        for key, entry in sorted(data_cache._store.items()):
+            remaining = entry.ttl - (_time.monotonic() - entry.created_at)
+            if remaining > 0:
+                mins = int(remaining // 60)
+                secs = int(remaining % 60)
+                lines.append(f"    {key} — {mins}м {secs}с (x{entry.access_count})")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистить кэш (админ)"""
+    if not _is_admin(update.effective_user.id):
+        await update.message.reply_text("⛔ Только для администраторов.")
+        return
+    data_cache.invalidate()
+    await update.message.reply_text("🗑️ Кэш очищен.")
+
+
 # ─── Мониторинг стоп-листа ────────────────────────────────
 
 _stop_monitor = None  # Глобальная ссылка для cmd_monitor
@@ -2342,6 +2431,7 @@ async def post_init(application: Application):
         BotCommand("users", "Список пользователей (админ)"),
         BotCommand("revoke", "Забрать доступ (админ)"),
         BotCommand("monitor", "Статус мониторинга стоп-листа"),
+        BotCommand("cache", "Статистика кэша"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -2356,6 +2446,7 @@ async def post_init(application: Application):
             iiko_cloud=iiko_cloud,
             iiko_server=iiko_server,
             poll_interval=STOP_MONITOR_INTERVAL,
+            cache=data_cache,
         )
         jq = application.job_queue
 
@@ -2404,6 +2495,8 @@ def main():
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
     app.add_handler(CommandHandler("monitor", cmd_monitor))
+    app.add_handler(CommandHandler("cache", cmd_cache))
+    app.add_handler(CommandHandler("clearcache", cmd_clearcache))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)

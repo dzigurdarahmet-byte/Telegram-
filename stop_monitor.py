@@ -22,10 +22,11 @@ MAX_ITEMS_IN_NOTIFICATION = 15
 class StopListMonitor:
     """Мониторинг изменений стоп-листа iiko"""
 
-    def __init__(self, iiko_cloud, iiko_server=None, poll_interval: int = 600):
+    def __init__(self, iiko_cloud, iiko_server=None, poll_interval: int = 600, cache=None):
         self.iiko_cloud = iiko_cloud
         self.iiko_server = iiko_server
         self.poll_interval = poll_interval
+        self._cache = cache
         self._previous_state: dict = {}  # {name: {"balance": float, "is_bar": bool, "group": str}}
         self._initialized: bool = False
         self._consecutive_errors: int = 0
@@ -293,6 +294,9 @@ class StopListMonitor:
 
                 if text:
                     self._mark_notified(changes)
+                    # Инвалидируем кэш стоп-листа при изменениях
+                    if self._cache:
+                        self._cache.invalidate("stop_list")
                     try:
                         await bot.send_message(chat_id, text)
                         logger.info("Мониторинг стоп-листа: уведомление отправлено")
