@@ -111,6 +111,8 @@ class ConversationEntry:
     content: str
     timestamp: float
     period: str = ""
+    command: str = ""       # контекст команды: "foodcost", "kpi", "period:yesterday", etc.
+    data_summary: str = ""  # краткая сводка данных (для follow-up)
 
 
 class ConversationMemory:
@@ -121,19 +123,23 @@ class ConversationMemory:
         self.max_messages = max_messages
         self.ttl_seconds = ttl_minutes * 60
 
-    def add_user_message(self, user_id: int, text: str, period: str = ""):
+    def add_user_message(self, user_id: int, text: str, period: str = "", command: str = ""):
         self._cleanup(user_id)
         self._store[user_id].append(ConversationEntry(
-            role="user", content=text, timestamp=time.monotonic(), period=period,
+            role="user", content=text, timestamp=time.monotonic(),
+            period=period, command=command,
         ))
         if len(self._store[user_id]) > self.max_messages:
             self._store[user_id] = self._store[user_id][-self.max_messages:]
 
-    def add_assistant_message(self, user_id: int, text: str, period: str = ""):
+    def add_assistant_message(self, user_id: int, text: str, period: str = "",
+                              command: str = "", data_summary: str = ""):
         self._cleanup(user_id)
         short = text[:500] + "..." if len(text) > 500 else text
         self._store[user_id].append(ConversationEntry(
-            role="assistant", content=short, timestamp=time.monotonic(), period=period,
+            role="assistant", content=short, timestamp=time.monotonic(),
+            period=period, command=command,
+            data_summary=data_summary[:1000] if data_summary else "",
         ))
         if len(self._store[user_id]) > self.max_messages:
             self._store[user_id] = self._store[user_id][-self.max_messages:]
@@ -141,6 +147,27 @@ class ConversationMemory:
     def get_context(self, user_id: int) -> list[dict]:
         self._cleanup(user_id)
         return [{"role": e.role, "content": e.content} for e in self._store[user_id]]
+
+    def get_last_command(self, user_id: int) -> str:
+        self._cleanup(user_id)
+        for entry in reversed(self._store[user_id]):
+            if entry.role == "assistant" and entry.command:
+                return entry.command
+        return ""
+
+    def get_last_data_summary(self, user_id: int) -> str:
+        self._cleanup(user_id)
+        for entry in reversed(self._store[user_id]):
+            if entry.role == "assistant" and entry.data_summary:
+                return entry.data_summary
+        return ""
+
+    def get_last_period(self, user_id: int) -> str:
+        self._cleanup(user_id)
+        for entry in reversed(self._store[user_id]):
+            if entry.period:
+                return entry.period
+        return ""
 
     def clear(self, user_id: int):
         if user_id in self._store:
@@ -268,6 +295,176 @@ def _build_inline_keyboard(context_key: str):
     buttons = [InlineKeyboardButton(text, callback_data=cb) for text, cb in buttons_config]
     rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
     return InlineKeyboardMarkup(rows)
+
+
+# ─── Follow-up контекст ──────────────────────────────────
+
+FOLLOW_UP_PATTERNS = [
+    "подробнее", "расширь", "детальнее", "углубись", "разверни",
+    "продолж", "дополни", "больше инфо",
+    "а что с", "а как", "а почему", "а сколько", "а где", "а кто",
+    "а если", "расскажи про",
+    "объясни", "поясни",
+    "отсортируй", "фильтруй", "покажи только",
+]
+
+
+def _is_follow_up(question: str) -> bool:
+    """Определить, является ли вопрос продолжением предыдущего контекста."""
+    q = question.lower().strip()
+    word_count = len(q.split())
+
+    for pattern in FOLLOW_UP_PATTERNS:
+        if pattern in q:
+            return True
+
+    if q.startswith("а ") and word_count <= 8:
+        period_keywords = ["неделю", "месяц", "вчера", "сегодня", "год",
+                           "январ", "феврал", "март", "апрел", "мая", "май",
+                           "июн", "июл", "август", "сентябр", "октябр", "ноябр", "декабр"]
+        if any(kw in q for kw in period_keywords):
+            return False  # "А за неделю?" = новый запрос
+        return True
+
+    if q.startswith("и ") and word_count <= 6:
+        return True
+
+    return False
+
+
+async def _handle_follow_up(user_id: int, question: str, msg, update: Update) -> bool:
+    """Обработать follow-up вопрос с контекстом предыдущей команды.
+    Returns True если обработал, False если не follow-up."""
+    last_command = conversation_memory.get_last_command(user_id)
+    last_period = conversation_memory.get_last_period(user_id)
+    last_data = conversation_memory.get_last_data_summary(user_id)
+
+    if not last_command or not _is_follow_up(question):
+        return False
+
+    conversation_memory.add_user_message(user_id, question, period=last_period, command=last_command)
+
+    try:
+        data = ""
+        context_label = ""
+
+        if last_command == "foodcost":
+            context_label = "food cost"
+            if iiko_server:
+                from food_cost import FoodCostAnalyzer
+                analyzer = FoodCostAnalyzer(iiko_server)
+                date_from, date_to, _ = _get_period_dates(last_period or "month")
+                fc_data = await analyzer.get_food_cost_data(date_from, date_to)
+                dishes = analyzer.analyze(fc_data)
+                data = analyzer.format_for_ai(dishes, fc_data.get("has_cost", False))
+            else:
+                data = last_data
+
+        elif last_command == "kpi":
+            context_label = "KPI официантов"
+            if waiter_kpi:
+                data = await waiter_kpi.format_kpi_monthly()
+            else:
+                data = last_data
+
+        elif last_command == "cooks":
+            context_label = "производительность поваров"
+            if iiko_server:
+                date_from, date_to, _ = _get_period_dates(last_period or "week")
+                data = await iiko_server.get_cook_productivity_summary(
+                    date_from, date_to,
+                    cooks_count=COOKS_PER_SHIFT,
+                    cook_salary=COOK_SALARY_PER_SHIFT,
+                )
+            else:
+                data = last_data
+
+        elif last_command == "race":
+            context_label = "гонка KPI"
+            if waiter_kpi:
+                data = await waiter_kpi.format_race()
+            else:
+                data = last_data
+
+        elif last_command in ("forecast", "forecast_week", "staff_plan"):
+            context_label = "прогноз"
+            history = await _ensure_forecast_data()
+            if history.get("day_rows"):
+                patterns = forecaster.analyze_patterns(history)
+                if "error" not in patterns:
+                    today_d = datetime.now().date()
+                    parts_fc = []
+                    for i in range(7):
+                        target = today_d + timedelta(days=i)
+                        fc = forecaster.forecast_day(target, patterns)
+                        st = forecaster.recommend_staff(fc, patterns)
+                        parts_fc.append(forecaster.format_forecast(fc, st))
+                    data = "\n\n".join(parts_fc)
+            if not data:
+                data = last_data
+
+        elif last_command == "weekly":
+            context_label = "еженедельный отчёт"
+            data = last_data  # Не перезапрашиваем — слишком тяжёлый
+
+        elif last_command == "stop":
+            context_label = "стоп-лист"
+            data = await get_stop_list_text()
+
+        elif last_command.startswith("period:"):
+            period = last_command.replace("period:", "")
+            context_label = f"данные за {period}"
+            data = await get_combined_data(period)
+
+        elif last_command == "staff":
+            context_label = "отчёт по сотрудникам"
+            data = await get_combined_data(last_period or "week")
+
+        elif last_command == "abc":
+            context_label = "ABC-анализ"
+            data = await get_combined_data("month")
+
+        else:
+            data = last_data
+            context_label = "предыдущие данные"
+
+        if not data or not data.strip():
+            return False
+
+        data = "\n".join(
+            line for line in data.split("\n")
+            if not any(name in line for name in EXCLUDED_STAFF)
+        )
+
+        await msg.edit_text(f"🤔 Продолжаю анализ ({context_label})...")
+
+        history = conversation_memory.get_context(user_id)
+        dish_names = _extract_dish_names(data)
+        analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history)
+
+        conversation_memory.add_assistant_message(
+            user_id, analysis, period=last_period,
+            command=last_command, data_summary=data[:1000],
+        )
+
+        ctx_map = {
+            "foodcost": "abc", "kpi": "kpi", "cooks": "cooks", "race": "race",
+            "forecast": "forecast", "forecast_week": "forecast_week",
+            "staff_plan": "staff_plan", "weekly": "week", "stop": "stop",
+            "staff": "staff", "abc": "abc",
+        }
+        if last_command.startswith("period:"):
+            ctx_key = last_command.replace("period:", "")
+        else:
+            ctx_key = ctx_map.get(last_command, "free_question")
+
+        await _safe_send(msg, analysis, update, context_key=ctx_key)
+        return True
+
+    except Exception as e:
+        logger.error(f"Follow-up handler error: {e}")
+        return False
+
 
 # ─── Google Sheets ────────────────────────────────────────
 
@@ -634,10 +831,11 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
             if not any(name in line for name in EXCLUDED_STAFF)
         )
         dish_names = _extract_dish_names(data)
-        conversation_memory.add_user_message(user_id, f"/{period}", period=period)
+        cmd = f"period:{period}"
+        conversation_memory.add_user_message(user_id, f"/{period}", period=period, command=cmd)
         history = conversation_memory.get_context(user_id)
         analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history)
-        conversation_memory.add_assistant_message(user_id, analysis, period=period)
+        conversation_memory.add_assistant_message(user_id, analysis, period=period, command=cmd, data_summary=data[:1000])
         await _safe_send(msg, analysis, update, context_key=period)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -970,6 +1168,9 @@ async def cmd_cooks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "какие дни самые прибыльные/убыточные",
             full_data
         )
+        user_id = update.effective_user.id
+        conversation_memory.add_user_message(user_id, "/cooks", period=period, command="cooks")
+        conversation_memory.add_assistant_message(user_id, analysis, period=period, command="cooks", data_summary=full_data[:1000])
         await _safe_send(msg, analysis, update, context_key="cooks")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -1118,7 +1319,11 @@ async def cmd_forecast(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parts.append(forecaster.format_forecast(fc, staff))
 
         text = "\n\n" + ("═" * 35) + "\n\n"
-        await _safe_send(msg, text.join(parts), update, context_key="forecast")
+        full = text.join(parts)
+        user_id = update.effective_user.id
+        conversation_memory.add_user_message(user_id, "/forecast", command="forecast")
+        conversation_memory.add_assistant_message(user_id, full, command="forecast")
+        await _safe_send(msg, full, update, context_key="forecast")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
@@ -2734,6 +2939,9 @@ async def cmd_kpi(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name = " ".join(args)
             text = await waiter_kpi.format_kpi_person(name)
 
+        user_id = update.effective_user.id
+        conversation_memory.add_user_message(user_id, "/kpi", command="kpi")
+        conversation_memory.add_assistant_message(user_id, text, command="kpi", data_summary=text[:1000])
         await _safe_send(msg, text, update, context_key="kpi")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка KPI: {e}")
@@ -2750,6 +2958,9 @@ async def cmd_race(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("🏁 Загружаю гонку...")
     try:
         text = await waiter_kpi.format_race()
+        user_id = update.effective_user.id
+        conversation_memory.add_user_message(user_id, "/race", command="race")
+        conversation_memory.add_assistant_message(user_id, text, command="race", data_summary=text[:1000])
         await _safe_send(msg, text, update, context_key="race")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -2811,6 +3022,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.edit_text(f"⚠️ Ошибка: {e}")
             return
 
+    # ═══ Follow-up: если предыдущая команда была foodcost/kpi/etc ═══
+    msg = await update.message.reply_text("🤔 Анализирую...")
+    follow_up_handled = await _handle_follow_up(user_id, question, msg, update)
+    if follow_up_handled:
+        return
+
     # Определяем, спрашивают ли про прогноз/планирование
     forecast_keywords = [
         "прогноз", "forecast", "ожидать", "планир", "смен",
@@ -2827,23 +3044,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     is_kpi_query = any(kw in q_lower for kw in kpi_keywords)
 
-    msg = await update.message.reply_text(
+    status_text = (
         "🔮 Строю прогноз..." if is_forecast_query
         else "📊 Загружаю KPI..." if is_kpi_query
         else "🤔 Анализирую..."
     )
+    await msg.edit_text(status_text)
     try:
         # KPI-запросы — данные WaiterKPI + Claude
         if is_kpi_query and waiter_kpi:
             kpi_text = await waiter_kpi.format_kpi_monthly()
-            conversation_memory.add_user_message(user_id, question, period="kpi")
+            conversation_memory.add_user_message(user_id, question, period="kpi", command="kpi")
             history = conversation_memory.get_context(user_id)
             analysis = claude.analyze(
                 question,
                 f"═══ KPI ОФИЦИАНТОВ ═══\n{kpi_text}\n═══════════════════════",
                 conversation_history=history,
             )
-            conversation_memory.add_assistant_message(user_id, analysis, period="kpi")
+            conversation_memory.add_assistant_message(user_id, analysis, period="kpi", command="kpi", data_summary=kpi_text[:1000])
             await _safe_send(msg, analysis, update, context_key="kpi")
             return
 
@@ -2912,10 +3130,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not any(name in line for name in EXCLUDED_STAFF)
         )
         dish_names = _extract_dish_names(data)
-        conversation_memory.add_user_message(user_id, question)
+        # Определяем command для контекста
+        if is_forecast_query:
+            detected_cmd = "forecast"
+        elif is_kpi_query:
+            detected_cmd = "kpi"
+        else:
+            dr = _parse_date_range(question)
+            detected_cmd = f"period:{_detect_period(question)}" if not dr else "period:custom"
+        conversation_memory.add_user_message(user_id, question, command=detected_cmd)
         history = conversation_memory.get_context(user_id)
         analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history)
-        conversation_memory.add_assistant_message(user_id, analysis)
+        conversation_memory.add_assistant_message(user_id, analysis, command=detected_cmd, data_summary=data[:1000])
         await _safe_send(msg, analysis, update, context_key="free_question")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -3060,6 +3286,9 @@ async def cmd_foodcost(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         analysis = claude.analyze(prompt, formatted)
+        user_id = update.effective_user.id
+        conversation_memory.add_user_message(user_id, "/foodcost", period=period, command="foodcost")
+        conversation_memory.add_assistant_message(user_id, analysis, period=period, command="foodcost", data_summary=formatted[:1000])
         await _safe_send(msg, analysis, update, context_key="abc")
 
         if not data.get("has_cost"):
@@ -3127,6 +3356,9 @@ async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = await builder.collect_data()
         prompt = builder.build_ai_prompt()
         analysis = claude.analyze(prompt, data)
+        user_id = update.effective_user.id
+        conversation_memory.add_user_message(user_id, "/weekly", command="weekly")
+        conversation_memory.add_assistant_message(user_id, analysis, command="weekly", data_summary=data[:1000])
         await _safe_send(msg, f"📋 *Еженедельный отчёт*\n\n{analysis}", update, context_key="week")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
