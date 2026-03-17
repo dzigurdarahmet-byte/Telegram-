@@ -416,3 +416,101 @@ def generate_abc_bubble(dish_data: list, label: str = "") -> io.BytesIO:
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
+# ═══════════════════════════════════════════════════════════
+# 4. УТРЕННИЙ ДАЙДЖЕСТ-КАРТОЧКА
+# ═══════════════════════════════════════════════════════════
+
+def generate_morning_digest(data: dict) -> io.BytesIO:
+    """Визуальная карточка утреннего дайджеста (800x500)."""
+    from matplotlib.patches import FancyBboxPatch
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 6.25))
+    fig.patch.set_facecolor(BG_COLOR)
+    ax.set_facecolor(BG_COLOR)
+    ax.axis("off")
+    ax.set_xlim(0, 10)
+    ax.set_ylim(0, 6.25)
+
+    def _change_text(pct):
+        if pct > 0:
+            return f"+{pct}%", COLOR_UP
+        elif pct < 0:
+            return f"{pct}%", COLOR_DOWN
+        return "0%", TEXT_MUTED
+
+    def _draw_metric_card(x, y, w, h, title, value, change_pct=None):
+        box = FancyBboxPatch((x, y), w, h,
+            boxstyle="round,pad=0.15", facecolor=CARD_COLOR,
+            edgecolor=GRID_COLOR, linewidth=0.8)
+        ax.add_patch(box)
+        ax.text(x + w / 2, y + h - 0.25, title, ha="center", va="top",
+                fontsize=9, color=TEXT_MUTED)
+        ax.text(x + w / 2, y + h / 2 - 0.05, value, ha="center", va="center",
+                fontsize=18, fontweight="bold", color=TEXT_COLOR,
+                path_effects=[pe.withStroke(linewidth=2, foreground=BG_COLOR)])
+        if change_pct is not None:
+            txt, col = _change_text(change_pct)
+            arrow = "\u25b2" if change_pct > 0 else ("\u25bc" if change_pct < 0 else "\u25b6")
+            ax.text(x + w / 2, y + 0.25, f"{arrow} {txt}", ha="center", va="bottom",
+                    fontsize=10, fontweight="bold", color=col)
+
+    # Заголовок
+    ax.text(5, 5.9, f"УТРЕННИЙ ДАЙДЖЕСТ  \u2022  {data.get('date_label', '')}",
+            ha="center", va="top", fontsize=16, fontweight="bold", color=TEXT_COLOR)
+    ax.plot([0.5, 9.5], [5.55, 5.55], color=GRID_COLOR, linewidth=1)
+
+    # Верхний ряд: 2 больших карточки
+    rev = data.get("revenue_yesterday", 0)
+    rev_str = f"{_fmt_number(rev)}" if rev else "\u2014"
+    _draw_metric_card(0.3, 3.5, 4.2, 1.9, "ВЫРУЧКА ВЧЕРА", rev_str,
+                      data.get("revenue_change_pct"))
+
+    check = data.get("avg_check", 0)
+    check_str = f"{_fmt_number(check)}" if check else "\u2014"
+    _draw_metric_card(5.5, 3.5, 4.2, 1.9, "СРЕДНИЙ ЧЕК", check_str,
+                      data.get("avg_check_change_pct"))
+
+    # Нижний ряд: 3 карточки
+    orders = data.get("orders_yesterday", 0)
+    _draw_metric_card(0.3, 1.6, 2.8, 1.7, "ЗАКАЗОВ", str(orders) if orders else "\u2014",
+                      data.get("orders_change_pct"))
+
+    del_rev = data.get("delivery_revenue", 0)
+    del_str = f"{_fmt_number(del_rev)}" if del_rev else "\u2014"
+    _draw_metric_card(3.6, 1.6, 2.8, 1.7, "ДОСТАВКА", del_str,
+                      data.get("delivery_change_pct"))
+
+    stop = data.get("stop_count", 0)
+    stop_label = f"{stop} поз."
+    _draw_metric_card(6.9, 1.6, 2.8, 1.7, "СТОП-ЛИСТ", stop_label, None)
+    stop_new = data.get("stop_new", 0)
+    if stop_new > 0:
+        ax.text(8.3, 1.85, f"+{stop_new} новых", ha="center", va="bottom",
+                fontsize=9, color=COLOR_DOWN)
+
+    # Нижняя полоса
+    ax.plot([0.5, 9.5], [1.35, 1.35], color=GRID_COLOR, linewidth=1)
+
+    fc = data.get("forecast_today", 0)
+    fc_str = f"~{_fmt_number(fc)}" if fc else "\u2014"
+    staff = data.get("forecast_staff", "")
+    staff_str = f" | {staff}" if staff else ""
+    ax.text(0.5, 0.85, f"ПРОГНОЗ: {fc_str}{staff_str}",
+            fontsize=11, color=COLOR_CURRENT, fontweight="bold")
+
+    kpi_name = data.get("kpi_leader_name", "")
+    kpi_rev = data.get("kpi_leader_revenue", 0)
+    kpi_pct = data.get("kpi_leader_pct", 0)
+    if kpi_name:
+        ax.text(0.5, 0.35, f"ЛИДЕР: {kpi_name} {_fmt_number(kpi_rev)} ({kpi_pct}% цели)",
+                fontsize=11, color=COLOR_UP)
+    else:
+        ax.text(0.5, 0.35, "KPI: нет данных", fontsize=11, color=TEXT_MUTED)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=80, facecolor=BG_COLOR, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf

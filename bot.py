@@ -3192,13 +3192,147 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Автоотчёты ────────────────────────────────────────────
 
+async def _collect_digest_data() -> dict:
+    """Собрать данные для утреннего дайджеста"""
+    now = datetime.now()
+    yesterday = now - timedelta(days=1)
+    _WD = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    _MG = ["", "января", "февраля", "марта", "апреля", "мая", "июня",
+           "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+
+    result = {
+        "date_label": f"{_WD[now.weekday()]}, {now.day} {_MG[now.month]}",
+        "revenue_yesterday": 0, "revenue_change_pct": 0,
+        "avg_check": 0, "avg_check_change_pct": 0,
+        "orders_yesterday": 0, "orders_change_pct": 0,
+        "delivery_revenue": 0, "delivery_change_pct": 0,
+        "stop_count": 0, "stop_new": 0,
+        "forecast_today": 0, "forecast_staff": "",
+        "kpi_leader_name": "", "kpi_leader_revenue": 0, "kpi_leader_pct": 0,
+    }
+
+    yesterday_str = yesterday.strftime("%Y-%m-%d")
+
+    # 1. Выручка зала + доставка
+    if iiko_server:
+        try:
+            totals = await iiko_server.get_period_totals(yesterday_str, yesterday_str)
+            result["revenue_yesterday"] = totals["revenue"]
+            result["orders_yesterday"] = totals["orders"]
+            result["avg_check"] = totals["avg_check"]
+        except Exception as e:
+            logger.warning(f"Digest hall: {e}")
+        try:
+            del_totals = await iiko_server.get_delivery_period_totals(yesterday_str, yesterday_str)
+            result["delivery_revenue"] = del_totals["revenue"]
+            result["revenue_yesterday"] += del_totals["revenue"]
+            total_orders = result["orders_yesterday"] + del_totals["orders"]
+            if total_orders > 0:
+                result["avg_check"] = result["revenue_yesterday"] / total_orders
+            result["orders_yesterday"] = total_orders
+        except Exception as e:
+            logger.warning(f"Digest delivery: {e}")
+
+    # 2. Сравнение с нормой
+    try:
+        history = forecaster.load_history()
+        if history.get("day_rows"):
+            patterns = forecaster.analyze_patterns(history)
+            if "error" not in patterns:
+                wd = yesterday.weekday()
+                wd_avg = patterns.get("weekday_avg", {}).get(wd, {})
+                exp_rev = wd_avg.get("revenue", 0)
+                exp_ord = wd_avg.get("orders", 0)
+                if exp_rev > 0:
+                    result["revenue_change_pct"] = round((result["revenue_yesterday"] - exp_rev) / exp_rev * 100)
+                if exp_ord > 0:
+                    result["orders_change_pct"] = round((result["orders_yesterday"] - exp_ord) / exp_ord * 100)
+                    exp_check = exp_rev / exp_ord if exp_ord > 0 else 0
+                    if exp_check > 0:
+                        result["avg_check_change_pct"] = round((result["avg_check"] - exp_check) / exp_check * 100)
+    except Exception as e:
+        logger.warning(f"Digest patterns: {e}")
+
+    # 3. Стоп-лист
+    try:
+        extra = {}
+        if iiko_server:
+            extra = await iiko_server.get_products()
+        items = await iiko_cloud._get_stop_list_items(extra)
+        result["stop_count"] = sum(len(items.get(k, [])) for k in items)
+    except Exception as e:
+        logger.warning(f"Digest stop: {e}")
+
+    # 4. Прогноз на сегодня
+    try:
+        history = forecaster.load_history()
+        if history.get("day_rows"):
+            patterns = forecaster.analyze_patterns(history)
+            if "error" not in patterns:
+                fc = forecaster.forecast_day(now.date(), patterns)
+                st = forecaster.recommend_staff(fc, patterns)
+                if "error" not in fc:
+                    result["forecast_today"] = fc["revenue"]
+                if "error" not in st:
+                    result["forecast_staff"] = f"{st['cooks']}п+{st['waiters']}о"
+    except Exception as e:
+        logger.warning(f"Digest forecast: {e}")
+
+    # 5. KPI лидер
+    if waiter_kpi:
+        try:
+            first_day = now.replace(day=1).strftime("%Y-%m-%d")
+            today_str = now.strftime("%Y-%m-%d")
+            kpi_data = await waiter_kpi.get_kpi_data(first_day, today_str)
+            candidates = []
+            for w in kpi_data:
+                _, info = waiter_kpi._match_staff_role(w["name"])
+                if info and info.get("role") != "admin_service":
+                    candidates.append((w, info))
+                elif not info:
+                    candidates.append((w, None))
+            if candidates:
+                leader, leader_info = max(candidates, key=lambda x: x[0]["total_revenue"])
+                result["kpi_leader_name"] = leader["name"].split()[0]
+                result["kpi_leader_revenue"] = leader["total_revenue"]
+                target = leader_info["target"] if leader_info else waiter_kpi.default_target
+                result["kpi_leader_pct"] = round(leader["total_revenue"] / target * 100) if target > 0 else 0
+        except Exception as e:
+            logger.warning(f"Digest KPI: {e}")
+
+    return result
+
+
 async def send_morning_report(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_CHAT_ID:
         return
     try:
-        data = await get_combined_data("yesterday")
+        # 1. Визуальная карточка
+        try:
+            digest_data = await _collect_digest_data()
+            from charts import generate_morning_digest
+            card_buf = generate_morning_digest(digest_data)
+            if card_buf:
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("📊 Подробнее", callback_data="report:yesterday"),
+                        InlineKeyboardButton("🚫 Стоп-лист", callback_data="stop:full"),
+                    ],
+                    [
+                        InlineKeyboardButton("🏆 KPI", callback_data="report:kpi"),
+                        InlineKeyboardButton("🔮 Прогноз", callback_data="report:forecast"),
+                    ],
+                ])
+                await context.bot.send_photo(
+                    ADMIN_CHAT_ID, photo=card_buf,
+                    caption="☀️ Доброе утро! Вот ваш дайджест.",
+                    reply_markup=keyboard,
+                )
+        except Exception as e:
+            logger.warning(f"Утренняя карточка: {e}")
 
-        # Добавляем прогноз на сегодня
+        # 2. Текстовый AI-отчёт
+        data = await get_combined_data("yesterday")
         forecast_block = ""
         try:
             history = await _ensure_forecast_data()
@@ -3212,7 +3346,6 @@ async def send_morning_report(context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Прогноз для утреннего отчёта: {e}")
 
-        # KPI-блок
         kpi_block = ""
         if waiter_kpi:
             try:
@@ -3221,11 +3354,26 @@ async def send_morning_report(context: ContextTypes.DEFAULT_TYPE):
                 logger.warning(f"KPI для утреннего отчёта: {e}")
 
         analysis = claude.analyze(
-            "Утренний брифинг: итоги вчера (зал + доставка), стоп-лист, на что обратить внимание. "
-            "Также есть прогноз на сегодня и прогресс KPI официантов — включи всё в отчёт.",
+            "Утренний брифинг: итоги вчера (зал + доставка), на что обратить внимание. "
+            "Кратко — максимум 800 символов.",
             data + forecast_block + kpi_block
         )
-        await context.bot.send_message(ADMIN_CHAT_ID, f"☀️ *Утренний отчёт*\n\n{analysis}", parse_mode="Markdown")
+        try:
+            await context.bot.send_message(ADMIN_CHAT_ID, f"📋 Детали:\n\n{analysis}", parse_mode="Markdown")
+        except Exception:
+            await context.bot.send_message(ADMIN_CHAT_ID, f"📋 Детали:\n\n{analysis}")
+
+        # 3. График тренда за неделю
+        try:
+            hall_days, delivery_days, _ = await _prepare_trend_data("week")
+            if hall_days:
+                from charts import generate_revenue_trend
+                trend_buf = generate_revenue_trend(hall_days, delivery_days, "Последние 7 дней")
+                if trend_buf:
+                    await context.bot.send_photo(ADMIN_CHAT_ID, photo=trend_buf, caption="📈 Тренд за неделю")
+        except Exception as e:
+            logger.warning(f"Тренд для утреннего: {e}")
+
     except Exception as e:
         logger.error(f"Утренний отчёт ошибка: {e}")
 
