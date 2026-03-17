@@ -207,13 +207,15 @@ INLINE_BUTTONS = {
     ],
     "week": [
         ("📊 За месяц", "report:month"),
-        ("📋 ABC-анализ", "report:abc"),
-        ("🔄 Прошлая неделя", "report:prev_week"),
+        ("📈 Тренд", "chart:trend:week"),
+        ("📋 ABC", "report:abc"),
+        ("🔄 Прошлая", "report:prev_week"),
     ],
     "month": [
-        ("📋 ABC-анализ", "report:abc"),
-        ("👥 Сотрудники", "report:staff"),
-        ("🔄 vs прошлый год", "compare:yoy"),
+        ("📋 ABC", "report:abc"),
+        ("📈 Тренд", "chart:trend:month"),
+        ("🔥 Heatmap", "chart:heatmap"),
+        ("🔄 vs год", "compare:yoy"),
     ],
     "stop": [
         ("🍷 Стоп бара", "stop:bar"),
@@ -1843,6 +1845,47 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _inline_alerts(query, context)
     elif data == "report:foodcost":
         await _inline_foodcost(query, context)
+    # Графики
+    elif data.startswith("chart:"):
+        parts = data.split(":")
+        chart_type = parts[1] if len(parts) > 1 else ""
+        chart_period = parts[2] if len(parts) > 2 else "week"
+        if chart_type == "trend":
+            await query.edit_message_text("📈 Строю график тренда...")
+            try:
+                hall_d, del_d, lbl = await _prepare_trend_data(chart_period)
+                from charts import generate_revenue_trend
+                buf = generate_revenue_trend(hall_d, del_d, lbl)
+                if buf:
+                    await query.message.reply_photo(photo=buf, caption=f"📈 Тренд: {lbl}")
+                else:
+                    await query.edit_message_text("⚠️ Мало данных для графика.")
+            except Exception as e:
+                await query.edit_message_text(f"⚠️ {e}")
+        elif chart_type == "heatmap":
+            await query.edit_message_text("🔥 Строю тепловую карту...")
+            try:
+                hm_data, lbl = await _prepare_heatmap_data("month")
+                from charts import generate_hourly_heatmap
+                buf = generate_hourly_heatmap(hm_data, label=lbl)
+                if buf:
+                    await query.message.reply_photo(photo=buf, caption=f"🔥 Загрузка: {lbl}")
+                else:
+                    await query.edit_message_text("⚠️ Мало данных.")
+            except Exception as e:
+                await query.edit_message_text(f"⚠️ {e}")
+        elif chart_type == "abc":
+            await query.edit_message_text("📊 Строю ABC-диаграмму...")
+            try:
+                abc_dishes, lbl = await _prepare_abc_data(chart_period)
+                from charts import generate_abc_bubble
+                buf = generate_abc_bubble(abc_dishes, lbl)
+                if buf:
+                    await query.message.reply_photo(photo=buf, caption=f"📊 ABC: {lbl}")
+                else:
+                    await query.edit_message_text("⚠️ Мало данных.")
+            except Exception as e:
+                await query.edit_message_text(f"⚠️ {e}")
 
 
 async def _handle_request_access(query, context: ContextTypes.DEFAULT_TYPE):
@@ -3236,6 +3279,168 @@ async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑️ Кэш очищен.")
 
 
+# ─── Графики ─────────────────────────────────────────────
+
+
+async def _prepare_trend_data(period: str):
+    """Подготовить данные для графика тренда."""
+    date_from, date_to, label = _get_period_dates(period)
+    hall_days, delivery_days = [], []
+    if iiko_server:
+        try:
+            data = await iiko_server.get_sales_data(date_from, date_to)
+            for row in data.get("day_rows", []):
+                ds = (row.get("OpenDate.Typed") or row.get("Учетный день") or "")[:10]
+                rev = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                ords = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
+                if ds and len(ds) >= 10:
+                    hall_days.append({"date": ds, "revenue": rev, "orders": int(ords)})
+        except Exception as e:
+            logger.warning(f"Trend hall data: {e}")
+        try:
+            del_data = await iiko_server.get_delivery_sales_data(date_from, date_to)
+            for row in del_data.get("day_rows", []):
+                ds = (row.get("OpenDate.Typed") or row.get("Учетный день") or "")[:10]
+                rev = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                ords = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
+                if ds and len(ds) >= 10:
+                    delivery_days.append({"date": ds, "revenue": rev, "orders": int(ords)})
+        except Exception as e:
+            logger.warning(f"Trend delivery data: {e}")
+    return hall_days, delivery_days, label
+
+
+async def _prepare_heatmap_data(period: str = "month"):
+    """Подготовить данные для heatmap."""
+    date_from, date_to, label = _get_period_dates(period)
+    result = []
+    if iiko_server:
+        try:
+            rows = await iiko_server._olap_request(
+                date_from, date_to,
+                group_fields=["OpenDate.Typed", "HourOpen"],
+                aggregate_fields=["DishDiscountSumInt", "UniqOrderId.OrdersCount"]
+            )
+            from collections import defaultdict as _dd
+            agg = _dd(lambda: {"revenue": 0, "orders": 0, "count": 0})
+            for row in rows:
+                ds = (row.get("OpenDate.Typed") or row.get("Учетный день") or "")[:10]
+                hour = row.get("HourOpen") or row.get("Час открытия") or ""
+                rev = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                ords = float(row.get("UniqOrderId.OrdersCount") or row.get("Заказов") or 0)
+                if ds and hour and len(ds) >= 10:
+                    try:
+                        d = datetime.strptime(ds, "%Y-%m-%d")
+                        key = (d.weekday(), int(hour))
+                        agg[key]["revenue"] += rev
+                        agg[key]["orders"] += ords
+                        agg[key]["count"] += 1
+                    except (ValueError, TypeError):
+                        pass
+            for (wd, h), vals in agg.items():
+                cnt = vals["count"] or 1
+                result.append({"weekday": wd, "hour": h,
+                               "revenue": vals["revenue"] / cnt,
+                               "orders": vals["orders"] / cnt})
+        except Exception as e:
+            logger.warning(f"Heatmap data: {e}")
+    return result, label
+
+
+async def _prepare_abc_data(period: str = "month"):
+    """Подготовить данные для ABC-графика."""
+    date_from, date_to, label = _get_period_dates(period)
+    dishes = []
+    if iiko_server:
+        try:
+            data = await iiko_server.get_sales_data(date_from, date_to)
+            for row in data.get("dish_rows", []):
+                name = row.get("DishName") or row.get("Блюдо") or "?"
+                group = row.get("DishGroup") or row.get("Группа блюда") or "?"
+                rev = float(row.get("DishDiscountSumInt") or row.get("Сумма со скидкой") or 0)
+                qty = float(row.get("DishAmountInt") or row.get("Количество блюд") or 0)
+                if rev > 0 and qty > 0:
+                    dishes.append({"name": name, "group": group, "revenue": rev, "qty": qty})
+        except Exception as e:
+            logger.warning(f"ABC data: {e}")
+    return dishes, label
+
+
+async def cmd_chart_trend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """График тренда выручки"""
+    if not check_access(update.effective_user.id):
+        return
+    period = "week"
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ("month", "месяц"):
+            period = "month"
+    msg = await update.message.reply_text("📈 Строю график тренда...")
+    try:
+        hall_days, delivery_days, label = await _prepare_trend_data(period)
+        if not hall_days:
+            await msg.edit_text("⚠️ Нет данных для графика.")
+            return
+        from charts import generate_revenue_trend
+        buf = generate_revenue_trend(hall_days, delivery_days, label)
+        if buf:
+            await msg.delete()
+            await update.message.reply_photo(photo=buf, caption=f"📈 Тренд выручки: {label}")
+        else:
+            await msg.edit_text("⚠️ Недостаточно данных (нужно минимум 2 дня).")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_chart_heatmap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Heatmap загрузки"""
+    if not check_access(update.effective_user.id):
+        return
+    metric = "revenue"
+    if context.args and context.args[0].lower() in ("orders", "заказы"):
+        metric = "orders"
+    msg = await update.message.reply_text("🔥 Строю тепловую карту...")
+    try:
+        data, label = await _prepare_heatmap_data("month")
+        if not data:
+            await msg.edit_text("⚠️ Нет данных для heatmap.")
+            return
+        from charts import generate_hourly_heatmap
+        buf = generate_hourly_heatmap(data, metric=metric, label=label)
+        if buf:
+            await msg.delete()
+            ml = "выручка" if metric == "revenue" else "заказы"
+            await update.message.reply_photo(photo=buf, caption=f"🔥 Загрузка ({ml}): {label}")
+        else:
+            await msg.edit_text("⚠️ Недостаточно данных.")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
+async def cmd_chart_abc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ABC-диаграмма"""
+    if not check_access(update.effective_user.id):
+        return
+    period = "month"
+    if context.args and context.args[0].lower() in ("week", "неделя"):
+        period = "week"
+    msg = await update.message.reply_text("📊 Строю ABC-диаграмму...")
+    try:
+        dishes, label = await _prepare_abc_data(period)
+        if len(dishes) < 5:
+            await msg.edit_text("⚠️ Мало данных для ABC-диаграммы (нужно минимум 5 блюд).")
+            return
+        from charts import generate_abc_bubble
+        buf = generate_abc_bubble(dishes, label)
+        if buf:
+            await msg.delete()
+            await update.message.reply_photo(photo=buf, caption=f"📊 ABC-анализ: {label}")
+        else:
+            await msg.edit_text("⚠️ Не удалось построить диаграмму.")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сбросить контекст диалога"""
     if not check_access(update.effective_user.id):
@@ -3449,6 +3654,9 @@ async def post_init(application: Application):
         BotCommand("clear", "Сбросить контекст диалога"),
         BotCommand("weekly", "Еженедельный отчёт"),
         BotCommand("foodcost", "Маржинальность блюд"),
+        BotCommand("trend", "График тренда выручки"),
+        BotCommand("heatmap", "Тепловая карта загрузки"),
+        BotCommand("bubble", "ABC-диаграмма блюд"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -3606,6 +3814,9 @@ def main():
     app.add_handler(CommandHandler("weekly", cmd_weekly))
     app.add_handler(CommandHandler("foodcost", cmd_foodcost))
     app.add_handler(CommandHandler("debugfoodcost", cmd_debugfoodcost))
+    app.add_handler(CommandHandler("trend", cmd_chart_trend))
+    app.add_handler(CommandHandler("heatmap", cmd_chart_heatmap))
+    app.add_handler(CommandHandler("bubble", cmd_chart_abc))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
