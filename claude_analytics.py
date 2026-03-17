@@ -10,7 +10,7 @@ from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """Ты — AI-аналитик ресторана, интегрированный с системой iiko. 
+SYSTEM_PROMPT = """Ты — AI-аналитик ресторана, интегрированный с системой iiko.
 Твоя задача — анализировать данные ресторана и отвечать на вопросы сотрудников простым понятным языком.
 
 Твои возможности:
@@ -48,7 +48,7 @@ SYSTEM_PROMPT = """Ты — AI-аналитик ресторана, интегр
 2. Если данные неполные — скажи об этом и дай рекомендации на основе того, что есть.
 3. При ABC-анализе:
    - Категория A: топ-20% позиций, дающих 80% выручки
-   - Категория B: следующие 30%, дающие 15% выручки  
+   - Категория B: следующие 30%, дающие 15% выручки
    - Категория C: остальные 50%, дающие 5% выручки
 4. Всегда давай actionable рекомендации (что конкретно сделать).
 5. Числа округляй до целых, если это рубли. Проценты — до 1 знака.
@@ -69,20 +69,30 @@ class ClaudeAnalytics:
         self.openai_model = openai_model
         self.openai_client = OpenAI(api_key=openai_api_key) if openai_api_key else None
 
-    def analyze(self, question: str, iiko_data: str, dish_names: list = None) -> str:
+    def analyze(self, question: str, iiko_data: str, dish_names: list = None,
+                conversation_history: list = None) -> str:
         """
-        Отправить вопрос + данные iiko в Claude и получить анализ
+        Отправить вопрос + данные iiko в AI и получить анализ.
 
         Args:
-            question: Вопрос пользователя (напр. "Какая выручка за вчера?")
+            question: Вопрос пользователя
             iiko_data: Данные из iiko в текстовом формате
             dish_names: Список названий блюд из последнего OLAP-запроса
+            conversation_history: Предыдущие сообщения [{"role": "user"|"assistant", "content": "..."}]
 
         Returns:
-            Ответ Claude с анализом
+            Ответ AI с анализом
         """
         current_date = datetime.now().strftime("%d.%m.%Y %H:%M")
         system = SYSTEM_PROMPT.format(current_date=current_date)
+
+        if conversation_history:
+            system += (
+                "\n\nКОНТЕКСТ ДИАЛОГА: Ниже — история предыдущих сообщений с этим пользователем. "
+                "Используй её для понимания уточняющих вопросов. "
+                "Если пользователь говорит 'а за неделю?' — он имеет в виду ту же метрику. "
+                "Если говорит 'а что с [блюдо]?' — спрашивает в контексте предыдущего периода."
+            )
 
         # Добавляем список блюд в контекст для корректного различения блюд и дат
         menu_block = ""
@@ -107,43 +117,47 @@ class ClaudeAnalytics:
             f"НЕ ГОВОРИ что данных нет или они отсутствуют — они перед тобой."
         )
 
+        # Строим messages с историей
+        messages = []
+        if conversation_history:
+            # Добавляем предыдущие сообщения (кроме последнего user — он пойдёт с данными)
+            for msg in conversation_history[:-1]:
+                messages.append(msg)
+        messages.append({"role": "user", "content": user_message})
+
         # Сначала пробуем OpenAI (основной AI)
         if self.openai_client:
             try:
-                return self._call_openai(system, user_message)
+                return self._call_openai(system, messages=messages)
             except Exception as e:
                 logger.warning(f"OpenAI ошибка, переключаюсь на Claude: {e}")
 
         # Фолбэк на Claude (резервный AI)
-        return self._call_claude(system, user_message, is_fallback=bool(self.openai_client))
+        return self._call_claude(system, messages=messages, is_fallback=bool(self.openai_client))
 
-    def _call_openai(self, system: str, user_message: str) -> str:
+    def _call_openai(self, system: str, user_message: str = None, messages: list = None) -> str:
         """Вызов OpenAI API с retry при rate limit"""
         import time
-        # Для o1/o3 моделей используем role "developer" вместо "system"
         model_lower = self.openai_model.lower()
         is_reasoning = model_lower.startswith("o1") or model_lower.startswith("o3")
-
-        if is_reasoning:
-            system_role = "developer"
-        else:
-            system_role = "system"
-
-        # o1/o3 используют max_completion_tokens вместо max_tokens
+        system_role = "developer" if is_reasoning else "system"
         token_kwargs = (
             {"max_completion_tokens": 2000} if is_reasoning
             else {"max_tokens": 2000}
         )
+
+        api_messages = [{"role": system_role, "content": system}]
+        if messages:
+            api_messages.extend(messages)
+        elif user_message:
+            api_messages.append({"role": "user", "content": user_message})
 
         max_retries = 2
         for attempt in range(max_retries + 1):
             try:
                 response = self.openai_client.chat.completions.create(
                     model=self.openai_model,
-                    messages=[
-                        {"role": system_role, "content": system},
-                        {"role": "user", "content": user_message},
-                    ],
+                    messages=api_messages,
                     **token_kwargs,
                 )
                 content = response.choices[0].message.content
@@ -159,16 +173,17 @@ class ClaudeAnalytics:
                     continue
                 raise
 
-    def _call_claude(self, system: str, user_message: str, is_fallback: bool = False) -> str:
+    def _call_claude(self, system: str, user_message: str = None,
+                     messages: list = None, is_fallback: bool = False) -> str:
         """Вызов Claude API (резервный)"""
+        api_messages = messages if messages else [{"role": "user", "content": user_message}]
+
         try:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=2000,
                 system=system,
-                messages=[
-                    {"role": "user", "content": user_message}
-                ]
+                messages=api_messages,
             )
             text = response.content[0].text
             if is_fallback:

@@ -8,7 +8,10 @@ import calendar
 import json
 import os
 import re
+import time
 import logging
+from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from telegram import Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup
@@ -96,6 +99,70 @@ if iiko_server:
 # ─── Кэш данных ──────────────────────────────────────────
 
 data_cache = DataCache(max_entries=200)
+
+
+# ─── Контекст диалогов ───────────────────────────────────
+
+
+@dataclass
+class ConversationEntry:
+    role: str
+    content: str
+    timestamp: float
+    period: str = ""
+
+
+class ConversationMemory:
+    """Хранилище контекста диалогов — последние N сообщений на пользователя."""
+
+    def __init__(self, max_messages: int = 10, ttl_minutes: int = 30):
+        self._store: dict[int, list[ConversationEntry]] = defaultdict(list)
+        self.max_messages = max_messages
+        self.ttl_seconds = ttl_minutes * 60
+
+    def add_user_message(self, user_id: int, text: str, period: str = ""):
+        self._cleanup(user_id)
+        self._store[user_id].append(ConversationEntry(
+            role="user", content=text, timestamp=time.monotonic(), period=period,
+        ))
+        if len(self._store[user_id]) > self.max_messages:
+            self._store[user_id] = self._store[user_id][-self.max_messages:]
+
+    def add_assistant_message(self, user_id: int, text: str, period: str = ""):
+        self._cleanup(user_id)
+        short = text[:500] + "..." if len(text) > 500 else text
+        self._store[user_id].append(ConversationEntry(
+            role="assistant", content=short, timestamp=time.monotonic(), period=period,
+        ))
+        if len(self._store[user_id]) > self.max_messages:
+            self._store[user_id] = self._store[user_id][-self.max_messages:]
+
+    def get_context(self, user_id: int) -> list[dict]:
+        self._cleanup(user_id)
+        return [{"role": e.role, "content": e.content} for e in self._store[user_id]]
+
+    def clear(self, user_id: int):
+        if user_id in self._store:
+            del self._store[user_id]
+
+    def _cleanup(self, user_id: int):
+        now = time.monotonic()
+        self._store[user_id] = [
+            e for e in self._store[user_id]
+            if (now - e.timestamp) < self.ttl_seconds
+        ]
+
+    def stats(self) -> dict:
+        total = sum(len(msgs) for msgs in self._store.values())
+        return {
+            "users_with_context": len(self._store),
+            "total_messages": total,
+            "ttl_minutes": self.ttl_seconds // 60,
+        }
+
+
+conversation_memory = ConversationMemory(max_messages=10, ttl_minutes=30)
+
 
 # ─── Inline-кнопки (контекстная навигация) ───────────────
 
@@ -556,17 +623,20 @@ async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period:
     """Общий обработчик для команд с периодом"""
     if not check_access(update.effective_user.id):
         return
+    user_id = update.effective_user.id
     _, _, label = _get_period_dates(period)
     msg = await update.message.reply_text(f"⏳ Загружаю данные ({label})...")
     try:
         data = await get_combined_data(period)
-        # Убираем исключённых сотрудников из данных
         data = "\n".join(
             line for line in data.split("\n")
             if not any(name in line for name in EXCLUDED_STAFF)
         )
         dish_names = _extract_dish_names(data)
-        analysis = claude.analyze(question, data, dish_names=dish_names)
+        conversation_memory.add_user_message(user_id, f"/{period}", period=period)
+        history = conversation_memory.get_context(user_id)
+        analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history)
+        conversation_memory.add_assistant_message(user_id, analysis, period=period)
         await _safe_send(msg, analysis, update, context_key=period)
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -2668,6 +2738,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     question = update.message.text
+    user_id = update.effective_user.id
 
     # Автопривязка Google Sheets — просто кинул ссылку в чат
     global _sheet_id
@@ -2736,10 +2807,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # KPI-запросы — данные WaiterKPI + Claude
         if is_kpi_query and waiter_kpi:
             kpi_text = await waiter_kpi.format_kpi_monthly()
+            conversation_memory.add_user_message(user_id, question, period="kpi")
+            history = conversation_memory.get_context(user_id)
             analysis = claude.analyze(
                 question,
                 f"═══ KPI ОФИЦИАНТОВ ═══\n{kpi_text}\n═══════════════════════",
+                conversation_history=history,
             )
+            conversation_memory.add_assistant_message(user_id, analysis, period="kpi")
             await _safe_send(msg, analysis, update, context_key="kpi")
             return
 
@@ -2808,7 +2883,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not any(name in line for name in EXCLUDED_STAFF)
         )
         dish_names = _extract_dish_names(data)
-        analysis = claude.analyze(question, data, dish_names=dish_names)
+        conversation_memory.add_user_message(user_id, question)
+        history = conversation_memory.get_context(user_id)
+        analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history)
+        conversation_memory.add_assistant_message(user_id, analysis)
         await _safe_send(msg, analysis, update, context_key="free_question")
     except Exception as e:
         await msg.edit_text(f"⚠️ Ошибка: {e}")
@@ -2903,6 +2981,14 @@ async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑️ Кэш очищен.")
 
 
+async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбросить контекст диалога"""
+    if not check_access(update.effective_user.id):
+        return
+    conversation_memory.clear(update.effective_user.id)
+    await update.message.reply_text("🧹 Контекст диалога очищен. Начинаем с чистого листа.")
+
+
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статус системы алертов"""
     if not check_access(update.effective_user.id):
@@ -2985,6 +3071,7 @@ async def post_init(application: Application):
         BotCommand("monitor", "Статус мониторинга стоп-листа"),
         BotCommand("cache", "Статистика кэша"),
         BotCommand("alerts", "Статус алертов аномалий"),
+        BotCommand("clear", "Сбросить контекст диалога"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -3076,6 +3163,7 @@ def main():
     app.add_handler(CommandHandler("cache", cmd_cache))
     app.add_handler(CommandHandler("clearcache", cmd_clearcache))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
+    app.add_handler(CommandHandler("clear", cmd_clear))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
