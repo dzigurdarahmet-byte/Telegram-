@@ -103,6 +103,12 @@ ANOMALY_CHAT_ID = int(_anomaly_chat) if _anomaly_chat else ADMIN_CHAT_ID
 RESTAURANT_OPEN_HOUR = int(os.getenv("RESTAURANT_OPEN_HOUR", "12"))
 RESTAURANT_CLOSE_HOUR = int(os.getenv("RESTAURANT_CLOSE_HOUR", "22"))
 
+# ─── Еженедельный отчёт ──────────────────────────────────
+
+WEEKLY_REPORT_ENABLED = os.getenv("WEEKLY_REPORT_ENABLED", "true").lower() in ("true", "1", "yes")
+WEEKLY_REPORT_DAY = int(os.getenv("WEEKLY_REPORT_DAY", "0"))  # 0 = понедельник
+WEEKLY_REPORT_HOUR_UTC = os.getenv("WEEKLY_REPORT_HOUR_UTC", "05:00")
+
 
 def validate():
     errors = []

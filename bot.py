@@ -35,6 +35,7 @@ from config import (
     STOP_MONITOR_ENABLED, STOP_MONITOR_INTERVAL, STOP_MONITOR_CHAT_ID,
     ANOMALY_ALERTS_ENABLED, ANOMALY_CHECK_INTERVAL, ANOMALY_REVENUE_LOW_PCT,
     ANOMALY_CHAT_ID, RESTAURANT_OPEN_HOUR, RESTAURANT_CLOSE_HOUR,
+    WEEKLY_REPORT_ENABLED, WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR_UTC,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
@@ -2989,6 +2990,27 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🧹 Контекст диалога очищен. Начинаем с чистого листа.")
 
 
+async def cmd_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Еженедельный отчёт — вручную"""
+    if not check_access(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("📋 Формирую еженедельный отчёт... (30-60 сек)")
+    try:
+        from weekly_report import WeeklyReportBuilder
+        builder = WeeklyReportBuilder(
+            iiko_server=iiko_server,
+            iiko_cloud=iiko_cloud,
+            forecaster=forecaster,
+            waiter_kpi=waiter_kpi,
+        )
+        data = await builder.collect_data()
+        prompt = builder.build_ai_prompt()
+        analysis = claude.analyze(prompt, data)
+        await _safe_send(msg, f"📋 *Еженедельный отчёт*\n\n{analysis}", update, context_key="week")
+    except Exception as e:
+        await msg.edit_text(f"⚠️ Ошибка: {e}")
+
+
 async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Статус системы алертов"""
     if not check_access(update.effective_user.id):
@@ -3072,6 +3094,7 @@ async def post_init(application: Application):
         BotCommand("cache", "Статистика кэша"),
         BotCommand("alerts", "Статус алертов аномалий"),
         BotCommand("clear", "Сбросить контекст диалога"),
+        BotCommand("weekly", "Еженедельный отчёт"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -3123,6 +3146,68 @@ async def post_init(application: Application):
         else:
             logger.info("Алерты аномалий: выключены")
 
+    # Еженедельный отчёт
+    if WEEKLY_REPORT_ENABLED and ADMIN_CHAT_ID:
+        from weekly_report import WeeklyReportBuilder
+        _weekly_builder = WeeklyReportBuilder(
+            iiko_server=iiko_server,
+            iiko_cloud=iiko_cloud,
+            forecaster=forecaster,
+            waiter_kpi=waiter_kpi,
+        )
+
+        async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
+            try:
+                data = await _weekly_builder.collect_data()
+                prompt = _weekly_builder.build_ai_prompt()
+                analysis = claude.analyze(prompt, data)
+                keyboard = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("📊 За месяц", callback_data="report:month"),
+                        InlineKeyboardButton("🏆 KPI", callback_data="report:kpi"),
+                    ],
+                    [
+                        InlineKeyboardButton("🔮 Прогноз", callback_data="report:forecast_week"),
+                        InlineKeyboardButton("📋 ABC", callback_data="report:abc"),
+                    ],
+                ])
+                text = f"📋 *Еженедельный отчёт*\n\n{analysis}"
+                if len(text) > 4000:
+                    await context.bot.send_message(ADMIN_CHAT_ID, text[:4000], parse_mode="Markdown")
+                    await context.bot.send_message(ADMIN_CHAT_ID, text[4000:], reply_markup=keyboard)
+                else:
+                    try:
+                        await context.bot.send_message(
+                            ADMIN_CHAT_ID, text,
+                            parse_mode="Markdown", reply_markup=keyboard,
+                        )
+                    except Exception:
+                        await context.bot.send_message(
+                            ADMIN_CHAT_ID, text, reply_markup=keyboard,
+                        )
+            except Exception as e:
+                logger.error(f"Еженедельный отчёт: {e}")
+                try:
+                    await context.bot.send_message(
+                        ADMIN_CHAT_ID,
+                        f"⚠️ Не удалось сформировать еженедельный отчёт: {e}"
+                    )
+                except Exception:
+                    pass
+
+        jq = application.job_queue
+        report_time = datetime.strptime(WEEKLY_REPORT_HOUR_UTC, "%H:%M").time()
+        jq.run_daily(
+            send_weekly_report,
+            time=report_time,
+            days=(WEEKLY_REPORT_DAY,),
+            name="weekly_report",
+        )
+        day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        logger.info(f"Еженедельный отчёт: {day_names[WEEKLY_REPORT_DAY]} {WEEKLY_REPORT_HOUR_UTC} UTC")
+    else:
+        logger.info("Еженедельный отчёт: выключен")
+
     logger.info("🚀 Бот запущен!")
 
 
@@ -3164,6 +3249,7 @@ def main():
     app.add_handler(CommandHandler("clearcache", cmd_clearcache))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("clear", cmd_clear))
+    app.add_handler(CommandHandler("weekly", cmd_weekly))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
