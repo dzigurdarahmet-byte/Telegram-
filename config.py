@@ -86,6 +86,13 @@ EXCLUDED_STAFF = [x.strip() for x in _excluded_staff.split(",") if x.strip()] if
 
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 
+# ─── Мониторинг стоп-листа ────────────────────────────────
+
+STOP_MONITOR_ENABLED = os.getenv("STOP_MONITOR_ENABLED", "true").lower() in ("true", "1", "yes")
+STOP_MONITOR_INTERVAL = int(os.getenv("STOP_MONITOR_INTERVAL", "600"))
+_stop_chat = os.getenv("STOP_MONITOR_CHAT_ID", "")
+STOP_MONITOR_CHAT_ID = int(_stop_chat) if _stop_chat else ADMIN_CHAT_ID
+
 
 def validate():
     errors = []

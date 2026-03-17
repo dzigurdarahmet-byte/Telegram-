@@ -29,6 +29,7 @@ from config import (
     GOOGLE_SHEET_ID, EXCLUDED_STAFF,
     YANDEX_EDA_CLIENT_ID, YANDEX_EDA_CLIENT_SECRET,
     STAFF_ROLES, KPI_EXCLUDED, TRAINEE_MONTHLY_TARGET,
+    STOP_MONITOR_ENABLED, STOP_MONITOR_INTERVAL, STOP_MONITOR_CHAT_ID,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
@@ -2281,6 +2282,37 @@ async def send_evening_report(context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Вечерний отчёт ошибка: {e}")
 
 
+# ─── Мониторинг стоп-листа ────────────────────────────────
+
+_stop_monitor = None  # Глобальная ссылка для cmd_monitor
+
+
+async def cmd_monitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статус мониторинга стоп-листа"""
+    if not check_access(update.effective_user.id):
+        return
+    if not STOP_MONITOR_ENABLED:
+        await update.message.reply_text(
+            "⚪ Мониторинг стоп-листа выключен.\n"
+            "Включить: STOP_MONITOR_ENABLED=true в Railway Variables"
+        )
+        return
+    lines = [
+        "📡 Мониторинг стоп-листа",
+        f"  Интервал: каждые {STOP_MONITOR_INTERVAL // 60} мин",
+        f"  Уведомления: chat {STOP_MONITOR_CHAT_ID}",
+    ]
+    if _stop_monitor:
+        status = "🟢 работает" if _stop_monitor._initialized else "⏳ инициализация"
+        lines.append(f"  Состояние: {status}")
+        lines.append(f"  Позиций в стопе: {len(_stop_monitor._previous_state)}")
+        if _stop_monitor._consecutive_errors > 0:
+            lines.append(f"  ⚠️ Ошибок подряд: {_stop_monitor._consecutive_errors}")
+    else:
+        lines.append("  Состояние: не запущен")
+    await update.message.reply_text("\n".join(lines))
+
+
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "Начать работу"),
@@ -2309,11 +2341,32 @@ async def post_init(application: Application):
         BotCommand("race", "Гонка к цели"),
         BotCommand("users", "Список пользователей (админ)"),
         BotCommand("revoke", "Забрать доступ (админ)"),
+        BotCommand("monitor", "Статус мониторинга стоп-листа"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
         jq.run_daily(send_morning_report, time=datetime.strptime("05:00", "%H:%M").time(), name="morning")
         jq.run_daily(send_evening_report, time=datetime.strptime("19:00", "%H:%M").time(), name="evening")
+
+    # Мониторинг стоп-листа
+    global _stop_monitor
+    if STOP_MONITOR_ENABLED and STOP_MONITOR_CHAT_ID:
+        from stop_monitor import StopListMonitor
+        _stop_monitor = StopListMonitor(
+            iiko_cloud=iiko_cloud,
+            iiko_server=iiko_server,
+            poll_interval=STOP_MONITOR_INTERVAL,
+        )
+        jq = application.job_queue
+
+        async def _start_monitor(context: ContextTypes.DEFAULT_TYPE):
+            await _stop_monitor.run_loop(context.bot, int(STOP_MONITOR_CHAT_ID))
+
+        jq.run_once(_start_monitor, when=10)
+        logger.info(f"Мониторинг стоп-листа: включён (каждые {STOP_MONITOR_INTERVAL}с)")
+    else:
+        logger.info("Мониторинг стоп-листа: выключен")
+
     logger.info("🚀 Бот запущен!")
 
 
@@ -2350,6 +2403,7 @@ def main():
     app.add_handler(CommandHandler("race", cmd_race))
     app.add_handler(CommandHandler("users", cmd_users))
     app.add_handler(CommandHandler("revoke", cmd_revoke))
+    app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
