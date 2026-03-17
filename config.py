@@ -93,6 +93,16 @@ STOP_MONITOR_INTERVAL = int(os.getenv("STOP_MONITOR_INTERVAL", "600"))
 _stop_chat = os.getenv("STOP_MONITOR_CHAT_ID", "")
 STOP_MONITOR_CHAT_ID = int(_stop_chat) if _stop_chat else ADMIN_CHAT_ID
 
+# ─── Алерты аномалий ──────────────────────────────────────
+
+ANOMALY_ALERTS_ENABLED = os.getenv("ANOMALY_ALERTS_ENABLED", "true").lower() in ("true", "1", "yes")
+ANOMALY_CHECK_INTERVAL = int(os.getenv("ANOMALY_CHECK_INTERVAL", "1800"))
+ANOMALY_REVENUE_LOW_PCT = float(os.getenv("ANOMALY_REVENUE_LOW_PCT", "0.4"))
+_anomaly_chat = os.getenv("ANOMALY_CHAT_ID", "")
+ANOMALY_CHAT_ID = int(_anomaly_chat) if _anomaly_chat else ADMIN_CHAT_ID
+RESTAURANT_OPEN_HOUR = int(os.getenv("RESTAURANT_OPEN_HOUR", "12"))
+RESTAURANT_CLOSE_HOUR = int(os.getenv("RESTAURANT_CLOSE_HOUR", "22"))
+
 
 def validate():
     errors = []

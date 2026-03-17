@@ -30,6 +30,8 @@ from config import (
     YANDEX_EDA_CLIENT_ID, YANDEX_EDA_CLIENT_SECRET,
     STAFF_ROLES, KPI_EXCLUDED, TRAINEE_MONTHLY_TARGET,
     STOP_MONITOR_ENABLED, STOP_MONITOR_INTERVAL, STOP_MONITOR_CHAT_ID,
+    ANOMALY_ALERTS_ENABLED, ANOMALY_CHECK_INTERVAL, ANOMALY_REVENUE_LOW_PCT,
+    ANOMALY_CHAT_ID, RESTAURANT_OPEN_HOUR, RESTAURANT_CLOSE_HOUR,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
@@ -185,6 +187,7 @@ INLINE_BUTTONS = {
     "diag": [
         ("💾 Кэш", "report:cache"),
         ("📡 Мониторинг", "report:monitor"),
+        ("🔔 Алерты", "report:alerts"),
     ],
 }
 
@@ -1424,6 +1427,18 @@ async def _inline_cache(query, context):
     )
 
 
+async def _inline_alerts(query, context):
+    if not ANOMALY_ALERTS_ENABLED:
+        await query.edit_message_text("⚪ Алерты аномалий выключены.")
+        return
+    await query.edit_message_text(
+        f"🔔 Система алертов\n"
+        f"  Интервал: каждые {ANOMALY_CHECK_INTERVAL // 60} мин\n"
+        f"  Часы: {RESTAURANT_OPEN_HOUR}:00-{RESTAURANT_CLOSE_HOUR}:00\n"
+        f"  Порог: {ANOMALY_REVENUE_LOW_PCT:.0%} от нормы"
+    )
+
+
 async def _inline_monitor(query, context):
     if not STOP_MONITOR_ENABLED:
         await query.edit_message_text("⚪ Мониторинг стоп-листа выключен.")
@@ -1522,6 +1537,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _inline_cache(query, context)
     elif data == "report:monitor":
         await _inline_monitor(query, context)
+    elif data == "report:alerts":
+        await _inline_alerts(query, context)
 
 
 async def _handle_request_access(query, context: ContextTypes.DEFAULT_TYPE):
@@ -2886,6 +2903,26 @@ async def cmd_clearcache(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🗑️ Кэш очищен.")
 
 
+async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статус системы алертов"""
+    if not check_access(update.effective_user.id):
+        return
+    if not ANOMALY_ALERTS_ENABLED:
+        await update.message.reply_text(
+            "⚪ Алерты аномалий выключены.\n"
+            "Включить: ANOMALY_ALERTS_ENABLED=true"
+        )
+        return
+    lines = [
+        "🔔 Система алертов",
+        f"  Интервал: каждые {ANOMALY_CHECK_INTERVAL // 60} мин",
+        f"  Рабочие часы: {RESTAURANT_OPEN_HOUR}:00-{RESTAURANT_CLOSE_HOUR}:00",
+        f"  Порог выручки: {ANOMALY_REVENUE_LOW_PCT:.0%} от нормы",
+        f"  Уведомления: chat {ANOMALY_CHAT_ID}",
+    ]
+    await update.message.reply_text("\n".join(lines))
+
+
 # ─── Мониторинг стоп-листа ────────────────────────────────
 
 _stop_monitor = None  # Глобальная ссылка для cmd_monitor
@@ -2947,6 +2984,7 @@ async def post_init(application: Application):
         BotCommand("revoke", "Забрать доступ (админ)"),
         BotCommand("monitor", "Статус мониторинга стоп-листа"),
         BotCommand("cache", "Статистика кэша"),
+        BotCommand("alerts", "Статус алертов аномалий"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -2972,6 +3010,31 @@ async def post_init(application: Application):
         logger.info(f"Мониторинг стоп-листа: включён (каждые {STOP_MONITOR_INTERVAL}с)")
     else:
         logger.info("Мониторинг стоп-листа: выключен")
+
+    # Алерты аномалий
+    if ANOMALY_ALERTS_ENABLED and ANOMALY_CHAT_ID and iiko_server:
+        from anomaly_detector import AnomalyDetector
+        _detector = AnomalyDetector(
+            iiko_server=iiko_server,
+            forecaster=forecaster,
+            poll_interval=ANOMALY_CHECK_INTERVAL,
+            working_hours=(RESTAURANT_OPEN_HOUR, RESTAURANT_CLOSE_HOUR),
+            excluded_staff=EXCLUDED_STAFF + KPI_EXCLUDED,
+            revenue_low_threshold=ANOMALY_REVENUE_LOW_PCT,
+        )
+        jq = application.job_queue
+
+        async def _start_detector(context: ContextTypes.DEFAULT_TYPE):
+            await _detector.run_loop(context.bot, int(ANOMALY_CHAT_ID))
+
+        jq.run_once(_start_detector, when=30)
+        logger.info(f"Алерты аномалий: включены (каждые {ANOMALY_CHECK_INTERVAL}с, "
+                     f"{RESTAURANT_OPEN_HOUR}:00-{RESTAURANT_CLOSE_HOUR}:00)")
+    else:
+        if not iiko_server:
+            logger.info("Алерты аномалий: выключены (нет iiko Server)")
+        else:
+            logger.info("Алерты аномалий: выключены")
 
     logger.info("🚀 Бот запущен!")
 
@@ -3012,6 +3075,7 @@ def main():
     app.add_handler(CommandHandler("monitor", cmd_monitor))
     app.add_handler(CommandHandler("cache", cmd_cache))
     app.add_handler(CommandHandler("clearcache", cmd_clearcache))
+    app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
