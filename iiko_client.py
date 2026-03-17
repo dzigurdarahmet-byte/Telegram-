@@ -15,6 +15,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _mask_secrets(text: str) -> str:
+    """Замаскировать токены и ключи в тексте ошибки"""
+    text = re.sub(r'Bearer\s+[a-zA-Z0-9._-]+', 'Bearer ***', str(text))
+    text = re.sub(r'key=[a-zA-Z0-9-]+', 'key=***', text)
+    text = re.sub(r'token=[a-zA-Z0-9._-]+', 'token=***', text)
+    return text
+
 BASE_URL = "https://api-ru.iiko.services"
 
 
@@ -98,7 +106,7 @@ class IikoClient:
     async def get_nomenclature(self) -> dict:
         now = datetime.now()
         if (self._nomenclature_cache and self._nomenclature_cache_time
-                and (now - self._nomenclature_cache_time).total_seconds() < 1800):
+                and (now - self._nomenclature_cache_time).total_seconds() < 300):
             return self._nomenclature_cache
         org_id = await self.get_organization_id()
         data = await self._post("/api/1/nomenclature", {
@@ -199,40 +207,18 @@ class IikoClient:
             "organizationIds": [org_id]
         })
 
-    # Группы, относящиеся к бару
-    BAR_GROUPS = {
-        "алкогольные коктейли", "бар", "безалкогольные напитки",
-        "бренди и коньяк", "вермут", "вино", "вино безалкогольное",
-        "вино белое", "вино игристое", "вино красное", "вино оранжевое",
-        "вино розовое", "вино по бокалам", "виски", "вода", "водка",
-        "газированные напитки", "джин", "кофе", "крафтовый чай",
-        "крепкий алкоголь", "ликеры и настойки", "лимонады",
-        "милкшейки и сладкие напитки", "пиво", "пиво бутылочное",
-        "разливное пиво", "ром", "сок", "текила", "чай",
-        "соки&морс&gazirovka", "water",
-    }
-
-    # Ключевые слова — если группа содержит любое из них, это бар
-    BAR_KEYWORDS = {
-        "вино", "вин", "коктейл", "пиво", "виски", "водка", "джин",
-        "ром", "текила", "коньяк", "бренди", "ликер", "настойк",
-        "вермут", "шампанск", "игрист", "кофе", "чай", "сок",
-        "лимонад", "напиток", "милкшейк", "вода", "water", "бар",
-        "раф", "латте", "капучино", "эспрессо", "американо",
-        "флэт", "матча", "какао", "морс", "смузи",
-    }
-
     def _is_bar_item(self, name: str, group: str) -> bool:
         """Определить, относится ли позиция к бару (по группе ИЛИ по названию)"""
+        from constants import BAR_GROUPS, BAR_KEYWORDS
         g = group.lower().strip()
         n = name.lower().strip()
-        if g in self.BAR_GROUPS:
+        if g in BAR_GROUPS:
             return True
-        if any(kw in g for kw in self.BAR_KEYWORDS):
+        if any(kw in g for kw in BAR_KEYWORDS):
             return True
         # Название: пословный поиск (чтобы "барбекю" не ловило "бар", "свиной" не ловило "вин")
         words = re.split(r'[\s\-/,.()+]+', n)
-        return any(w in self.BAR_KEYWORDS for w in words)
+        return any(w in BAR_KEYWORDS for w in words)
 
     async def _get_stop_list_items(self, extra_products: dict = None) -> dict:
         """Получить все позиции стоп-листа, разделённые по категориям.
@@ -244,7 +230,6 @@ class IikoClient:
             kitchen_limits — кухня, ограничения
         """
         data = await self.get_stop_lists()
-        self._nomenclature_cache = None
         product_map = await self._get_product_map()
         if extra_products:
             for key, name in extra_products.items():
@@ -387,7 +372,7 @@ class IikoClient:
             except Exception as e:
                 if attempt < max_retries - 1:
                     wait = (attempt + 1) * 3  # 3s, 6s
-                    logger.warning(f"Retry {attempt+1}/{max_retries} for {date_from}: {e}, wait {wait}s")
+                    logger.warning(f"Retry {attempt+1}/{max_retries} for {date_from}: {_mask_secrets(str(e))}, wait {wait}s")
                     await asyncio.sleep(wait)
                     # Принудительно обновляем токен при ошибке
                     self.token = None
@@ -408,7 +393,7 @@ class IikoClient:
                     "startRevision": revision,
                 })
             except Exception as e:
-                logger.error(f"by_revision page {page}, rev={revision}: {e}")
+                logger.error(f"by_revision page {page}, rev={revision}: {_mask_secrets(str(e))}")
                 break
 
             page_orders = []
@@ -466,13 +451,19 @@ class IikoClient:
             # Для длинных диапазонов: сначала пробуем by_revision (полная история)
             methods_tried.append(f"by_revision ({date_from}—{date_to})")
             try:
-                revision_orders = await self._fetch_orders_by_revision(org_id, date_from, date_to)
+                revision_orders = await asyncio.wait_for(
+                    self._fetch_orders_by_revision(org_id, date_from, date_to),
+                    timeout=60.0
+                )
                 if revision_orders:
                     all_orders.extend(revision_orders)
                     methods_success.append(f"by_revision: {len(revision_orders)} заказов")
+            except asyncio.TimeoutError:
+                logger.warning("by_revision таймаут (>60s), переключаюсь на daily chunks")
+                errors.append("by_revision: таймаут")
             except Exception as e:
-                logger.error(f"by_revision не сработал: {e}")
-                errors.append(f"by_revision: {e}")
+                logger.error(f"by_revision не сработал: {_mask_secrets(str(e))}")
+                errors.append(f"by_revision: {_mask_secrets(str(e))}")
 
             # Если by_revision не дал результатов — fallback на daily chunks
             if not all_orders:

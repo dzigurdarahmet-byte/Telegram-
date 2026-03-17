@@ -278,7 +278,7 @@ class WaiterKPI:
         officials = [p for p in progress if p["role"] == "official"]
         trainees = [p for p in progress if p["role"] == "trainee"]
         admins = [p for p in progress if p["role"] == "admin_service"]
-        new_staff = [p for p in progress if p["is_new"]]
+        new_staff = [p for p in progress if p["is_new"] and p["role"] != "admin_service"]
 
         # Средний чек по всей команде (для определения лучшего)
         all_checks = [p["avg_check"] for p in progress if p["avg_check"] > 0]

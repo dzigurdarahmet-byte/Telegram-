@@ -89,6 +89,13 @@ async def fetch_salary_data(sheet_id: str, section: str = "Повар") -> dict:
             response.raise_for_status()
 
         text = response.text
+        # Проверка: если пришёл HTML вместо CSV — таблица не опубликована
+        if text.strip().startswith("<!") or text.strip().startswith("<html"):
+            result["error"] = (
+                "Таблица не опубликована в интернете. "
+                "Откройте Google Sheets → Файл → Поделиться → Опубликовать в интернете → CSV"
+            )
+            return result
         reader = csv.reader(io.StringIO(text))
         rows = list(reader)
 

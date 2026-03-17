@@ -208,7 +208,7 @@ class YandexEdaClient:
             if len(orders) < limit:
                 break
             offset += limit
-            self.token = None
+            self.token_expires = datetime.now()  # Принудительно протухший
 
         return all_orders
 
@@ -225,7 +225,7 @@ class YandexEdaClient:
             except Exception as e:
                 logger.error(f"Яндекс Еда order details: {e}")
             if i + 100 < len(eats_ids):
-                self.token = None
+                self.token_expires = datetime.now()  # Принудительно протухший
                 await asyncio.sleep(1)
         return all_details
 

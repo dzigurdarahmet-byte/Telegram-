@@ -26,7 +26,7 @@ from config import (
     ALLOWED_USERS, ADMIN_USERS, ADMIN_CHAT_ID, APPROVED_USERS,
     IIKO_SERVER_URL, IIKO_SERVER_LOGIN, IIKO_SERVER_PASSWORD,
     COOKS_PER_SHIFT, COOK_SALARY_PER_SHIFT, COOK_ROLE_CODES,
-    GOOGLE_SHEET_ID,
+    GOOGLE_SHEET_ID, EXCLUDED_STAFF,
     YANDEX_EDA_CLIENT_ID, YANDEX_EDA_CLIENT_SECRET,
     STAFF_ROLES, KPI_EXCLUDED, TRAINEE_MONTHLY_TARGET,
 )
@@ -106,10 +106,6 @@ def _extract_sheet_id(text: str) -> str:
     return ""
 
 
-# Сотрудники, которых исключаем из отчёта /staff (не обслуживают зал)
-EXCLUDED_STAFF = ["Стаховский Сергей", "denvic"]
-
-
 def _extract_dish_names(data_text: str) -> list:
     """Извлечь названия блюд из форматированного текста OLAP-данных.
     Формат строк:  '  НазваниеБлюда | 5 шт | 3500 руб.' или с группой.
@@ -122,7 +118,7 @@ def _extract_dish_names(data_text: str) -> list:
             if len(parts) >= 2:
                 name = parts[0].strip()
                 # Пропускаем заголовки и итоги
-                if name and not name.startswith("═") and not name.startswith("—"):
+                if name and not name.startswith("═") and not name.startswith("—") and not name.startswith("⚠"):
                     names.append(name)
     # Убираем дубли, сохраняя порядок
     seen = set()
@@ -225,7 +221,10 @@ async def get_combined_data(period: str) -> str:
             parts.append(f"⚠️ Зал: {e}")
 
     separator = "\n\n" + "═" * 40 + "\n\n"
-    return separator.join(parts)
+    result = separator.join(parts)
+    if parts and all(p.startswith("⚠️") for p in parts):
+        return "⚠️ Не удалось получить данные ни из одного источника.\n\n" + result
+    return result
 
 
 async def get_combined_data_by_dates(date_from: str, date_to: str, label: str) -> str:
@@ -392,6 +391,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _safe_send(msg, text: str, update: Update = None):
     """Отправить текст, разбивая длинные сообщения и обрабатывая ошибки Markdown"""
+    if not text or not text.strip():
+        text = "⚠️ AI вернул пустой ответ. Попробуйте переформулировать вопрос."
     if len(text) > 4000:
         parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
     else:
@@ -450,16 +451,35 @@ async def cmd_today(update, context):
     if not check_access(update.effective_user.id):
         return
 
-    # 1. Стоп-лист — отдельным сообщением, полный список, без Claude
-    try:
-        stop_text = await get_stop_list_text()
-        await update.message.reply_text(stop_text)
-    except Exception as e:
-        await update.message.reply_text(f"⚠️ Стоп-лист: {e}")
+    msg = await update.message.reply_text("⏳ Загружаю данные за сегодня...")
 
-    # 2. Аналитика через Claude
-    await cmd_period(update, context, "today",
-        "Полная сводка за сегодня: выручка по залу и доставке отдельно, средний чек, топ блюд")
+    # Параллельный запуск стоп-листа и данных
+    stop_task = asyncio.create_task(get_stop_list_text())
+    data_task = asyncio.create_task(get_combined_data("today"))
+
+    stop_text, data = await asyncio.gather(stop_task, data_task, return_exceptions=True)
+
+    # Стоп-лист
+    if isinstance(stop_text, Exception):
+        await update.message.reply_text(f"⚠️ Стоп-лист: {stop_text}")
+    else:
+        await update.message.reply_text(stop_text)
+
+    # Аналитика
+    if isinstance(data, Exception):
+        await msg.edit_text(f"⚠️ Ошибка данных: {data}")
+    else:
+        data = "\n".join(
+            line for line in data.split("\n")
+            if not any(name in line for name in EXCLUDED_STAFF)
+        )
+        dish_names = _extract_dish_names(data)
+        analysis = claude.analyze(
+            "Полная сводка за сегодня: выручка по залу и доставке отдельно, средний чек, топ блюд",
+            data, dish_names=dish_names
+        )
+        await _safe_send(msg, analysis, update)
+
     await _send_yoy_chart(update, "today")
 
 async def cmd_yesterday(update, context):
@@ -736,9 +756,11 @@ async def cmd_setsheet(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _sheet_id = new_id
     await update.message.reply_text(
-        f"Таблица привязана.\n"
-        f"ID: {_sheet_id}\n\n"
-        f"Теперь /cooks будет брать зарплаты из этой таблицы."
+        f"✅ Таблица привязана (до перезапуска бота).\n"
+        f"ID: `{_sheet_id}`\n\n"
+        f"⚠️ Чтобы сохранить навсегда — добавьте в Railway Variables:\n"
+        f"`GOOGLE_SHEET_ID={_sheet_id}`",
+        parse_mode="Markdown"
     )
 
 
@@ -1143,6 +1165,13 @@ async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Самопроверка бота: Junior (код) → Middle (логика) → Senior (бизнес)"""
     if not check_access(update.effective_user.id):
         return
+
+    # Защита от повторного запуска
+    if context.user_data.get("selfcheck_running"):
+        await update.message.reply_text("⏳ Самопроверка уже запущена, подождите...")
+        return
+    context.user_data["selfcheck_running"] = True
+
     msg = await update.message.reply_text(
         "🔍 Запускаю самопроверку (Junior → Middle → Senior)...\n"
         "Это займёт 30-60 секунд."
@@ -1475,7 +1504,7 @@ async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
     func_total = 5
     func_issues = []
 
-    async def _run_scenario(query: str, check_fn, description: str):
+    async def _run_scenario_inner(query: str, check_fn, description: str):
         """Прогнать сценарий: получить данные + ответ Claude, проверить результат."""
         nonlocal func_pass
         try:
@@ -1515,6 +1544,15 @@ async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 func_issues.append(f"'{query}' — {reason}")
         except Exception as e:
             func_issues.append(f"'{query}' — исключение: {e}")
+
+    async def _run_scenario(query: str, check_fn, description: str):
+        try:
+            await asyncio.wait_for(
+                _run_scenario_inner(query, check_fn, description),
+                timeout=45.0
+            )
+        except asyncio.TimeoutError:
+            func_issues.append(f"'{query}' — таймаут (>45 сек)")
 
     def _has_numbers(text):
         """Есть ли в тексте хотя бы одно число > 0"""
@@ -1591,6 +1629,7 @@ async def cmd_selfcheck(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     full_report = "\n".join(report_lines)
     await _safe_send(msg, full_report, update)
+    context.user_data["selfcheck_running"] = False
 
 
 async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1650,9 +1689,9 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 MONTH_MAP = {
-    "январ": 1, "феврал": 2, "март": 3, "марта": 3,
-    "апрел": 4, "мая": 5, "май": 5, "июн": 6,
-    "июл": 7, "август": 8, "сентябр": 9, "октябр": 10,
+    "январ": 1, "феврал": 2, "март": 3, "марта": 3, "марте": 3,
+    "апрел": 4, "мая": 5, "май": 5, "мае": 5, "июн": 6, "июне": 6,
+    "июл": 7, "июле": 7, "август": 8, "сентябр": 9, "октябр": 10,
     "ноябр": 11, "декабр": 12,
 }
 
@@ -1961,8 +2000,6 @@ def _parse_multi_periods(question: str):
         n_months = min(n_months, 6)
         periods = []
         for i in range(n_months - 1, -1, -1):
-            # Отматываем i месяцев назад
-            dt = today.replace(day=1) - timedelta(days=1) if i > 0 else today
             # Вычисляем год и месяц
             target_month = today.month - i
             target_year = today.year

@@ -118,7 +118,8 @@ class ClaudeAnalytics:
         return self._call_claude(system, user_message, is_fallback=bool(self.openai_client))
 
     def _call_openai(self, system: str, user_message: str) -> str:
-        """Вызов OpenAI API"""
+        """Вызов OpenAI API с retry при rate limit"""
+        import time
         # Для o1/o3 моделей используем role "developer" вместо "system"
         model_lower = self.openai_model.lower()
         is_reasoning = model_lower.startswith("o1") or model_lower.startswith("o3")
@@ -134,18 +135,29 @@ class ClaudeAnalytics:
             else {"max_tokens": 2000}
         )
 
-        response = self.openai_client.chat.completions.create(
-            model=self.openai_model,
-            messages=[
-                {"role": system_role, "content": system},
-                {"role": "user", "content": user_message},
-            ],
-            **token_kwargs,
-        )
-        content = response.choices[0].message.content
-        if not content:
-            raise ValueError("OpenAI вернул пустой ответ")
-        return content
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                response = self.openai_client.chat.completions.create(
+                    model=self.openai_model,
+                    messages=[
+                        {"role": system_role, "content": system},
+                        {"role": "user", "content": user_message},
+                    ],
+                    **token_kwargs,
+                )
+                content = response.choices[0].message.content
+                if not content:
+                    raise ValueError("OpenAI вернул пустой ответ")
+                return content
+            except Exception as e:
+                error_str = str(e).lower()
+                if ("rate_limit" in error_str or "429" in error_str) and attempt < max_retries:
+                    wait = (attempt + 1) * 2
+                    logger.warning(f"OpenAI rate limit, retry {attempt+1}/{max_retries} через {wait}s")
+                    time.sleep(wait)
+                    continue
+                raise
 
     def _call_claude(self, system: str, user_message: str, is_fallback: bool = False) -> str:
         """Вызов Claude API (резервный)"""

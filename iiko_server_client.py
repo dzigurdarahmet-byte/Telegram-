@@ -14,11 +14,18 @@ from typing import Optional
 from collections import defaultdict
 import logging
 import json
+import re as _re
+import asyncio
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
+
+
+def _mask_token_in_url(url: str) -> str:
+    """Замаскировать токен в URL для безопасного логирования"""
+    return _re.sub(r'key=[a-zA-Z0-9-]+', 'key=***masked***', str(url))
 
 
 class IikoServerClient:
@@ -32,19 +39,30 @@ class IikoServerClient:
         self.token: Optional[str] = None
         self.token_time: Optional[datetime] = None
         self.client = httpx.AsyncClient(timeout=60.0, verify=False)
+        logger.info(f"iikoServer init: {server_url} login={login} pass_hash={self.password_hash[:8]}...")
 
     async def _ensure_token(self):
-        """Получить или обновить токен"""
+        """Получить или обновить токен (с retry при сетевой ошибке)"""
         if self.token and self.token_time and (datetime.now() - self.token_time).total_seconds() < 600:
             return
-        response = await self.client.get(
-            f"{self.server_url}/resto/api/auth",
-            params={"login": self.login, "pass": self.password_hash}
-        )
-        response.raise_for_status()
-        self.token = response.text.strip().strip('"')
-        self.token_time = datetime.now()
-        logger.info("iikoServer token получен")
+        last_error = None
+        for attempt in range(3):
+            try:
+                response = await self.client.get(
+                    f"{self.server_url}/resto/api/auth",
+                    params={"login": self.login, "pass": self.password_hash}
+                )
+                response.raise_for_status()
+                self.token = response.text.strip().strip('"')
+                self.token_time = datetime.now()
+                logger.info("iikoServer token получен")
+                return
+            except Exception as e:
+                last_error = e
+                if attempt < 2:
+                    await asyncio.sleep(2 * (attempt + 1))
+                    logger.warning(f"iikoServer auth retry {attempt+1}/3: {_mask_token_in_url(str(e))}")
+        raise last_error
 
     async def _get(self, endpoint: str, params: dict = None) -> str:
         """GET-запрос"""
@@ -162,11 +180,14 @@ class IikoServerClient:
         lines = text.strip().split("\n")
         if len(lines) < 2:
             return []
-        headers = lines[0].split("\t")
+        headers = [h.strip() for h in lines[0].split("\t")]
         rows = []
         for line in lines[1:]:
             if line.strip():
-                values = line.split("\t")
+                values = [v.strip() for v in line.split("\t")]
+                # Дополняем если значений меньше чем заголовков
+                while len(values) < len(headers):
+                    values.append("")
                 row = dict(zip(headers, values))
                 rows.append(row)
         return rows
@@ -991,21 +1012,9 @@ class IikoServerClient:
 
         return results
 
-    # Группы, относящиеся к бару (для фильтрации кухонных позиций)
-    BAR_GROUPS = {
-        "алкогольные коктейли", "бар", "безалкогольные напитки",
-        "бренди и коньяк", "вермут", "вино", "вино безалкогольное",
-        "вино белое", "вино игристое", "вино красное", "вино оранжевое",
-        "вино розовое", "вино по бокалам", "виски", "вода", "водка",
-        "газированные напитки", "джин", "кофе", "крафтовый чай",
-        "крепкий алкоголь", "ликеры и настойки", "лимонады",
-        "милкшейки и сладкие напитки", "пиво", "пиво бутылочное",
-        "разливное пиво", "ром", "сок", "текила", "чай",
-        "соки&морс&gazirovka", "water",
-    }
-
     def _is_bar_group(self, group_name: str) -> bool:
-        return group_name.lower().strip() in self.BAR_GROUPS
+        from constants import BAR_GROUPS
+        return group_name.lower().strip() in BAR_GROUPS
 
     async def get_cook_productivity_summary(self, date_from: str, date_to: str,
                                               cooks_count: int = 0,

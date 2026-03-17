@@ -30,7 +30,7 @@ ALLOWED_USERS = [int(x.strip()) for x in _allowed.split(",") if x.strip()] if _a
 ADMIN_USERS = list(ALLOWED_USERS)
 
 # Одобренные пользователи (из переменной окружения, переживают перезапуск контейнера)
-_approved = os.getenv("APPROVED_USERS", "611739349")
+_approved = os.getenv("APPROVED_USERS", "")
 APPROVED_USERS = [int(x.strip()) for x in _approved.split(",") if x.strip()] if _approved else []
 
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "")
@@ -75,6 +75,12 @@ STAFF_ROLES = {
 
 # Исключить полностью из KPI (не обслуживают зал)
 KPI_EXCLUDED = ["Афанасьев Виктор", "Яковлев Михаил", "Стаховский Сергей", "denvic", "Чеботарь"]
+
+# ─── Google Sheets (зарплаты) ─────────────────────────────
+
+# ─── Исключённые из отчётов (не обслуживают зал) ──────────
+_excluded_staff = os.getenv("EXCLUDED_STAFF", "Стаховский Сергей,denvic")
+EXCLUDED_STAFF = [x.strip() for x in _excluded_staff.split(",") if x.strip()] if _excluded_staff else []
 
 # ─── Google Sheets (зарплаты) ─────────────────────────────
 
