@@ -5,6 +5,7 @@ Telegram-бот для аналитики ресторана
 
 import asyncio
 import calendar
+import io
 import json
 import os
 import re
@@ -36,6 +37,8 @@ from config import (
     ANOMALY_ALERTS_ENABLED, ANOMALY_CHECK_INTERVAL, ANOMALY_REVENUE_LOW_PCT,
     ANOMALY_CHAT_ID, RESTAURANT_OPEN_HOUR, RESTAURANT_CLOSE_HOUR,
     WEEKLY_REPORT_ENABLED, WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR_UTC,
+    VOICE_ENABLED, VOICE_TTS_ENABLED, VOICE_TTS_VOICE,
+    VOICE_TTS_MODEL, VOICE_TTS_MAX_LENGTH,
 )
 from salary_sheet import fetch_salary_data, format_salary_summary
 from charts import generate_yoy_chart
@@ -95,6 +98,19 @@ if iiko_server:
         default_target=TRAINEE_MONTHLY_TARGET,
     )
     logger.info("KPI официантов: подключён")
+
+# Голосовой модуль
+voice_processor = None
+if VOICE_ENABLED and OPENAI_API_KEY:
+    from voice import VoiceProcessor
+    voice_processor = VoiceProcessor(
+        api_key=OPENAI_API_KEY,
+        tts_model=VOICE_TTS_MODEL,
+        tts_voice=VOICE_TTS_VOICE,
+    )
+    logger.info(f"Голосовой модуль: STT вкл, TTS {'вкл' if VOICE_TTS_ENABLED else 'выкл'}, голос={VOICE_TTS_VOICE}")
+else:
+    logger.info("Голосовой модуль: выключен")
 
 
 # ─── Кэш данных ──────────────────────────────────────────
@@ -3589,6 +3605,185 @@ async def cmd_chart_abc(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"⚠️ Ошибка: {e}")
 
 
+async def _maybe_send_tts(update: Update, text: str):
+    """Отправить голосовой ответ если TTS включён"""
+    if not VOICE_TTS_ENABLED or not voice_processor:
+        return
+    try:
+        audio_bytes = await voice_processor.text_to_speech(text, max_length=VOICE_TTS_MAX_LENGTH)
+        if audio_bytes and len(audio_bytes) > 100:
+            await update.message.reply_voice(voice=io.BytesIO(audio_bytes))
+    except Exception as e:
+        logger.warning(f"TTS send error: {e}")
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка голосовых сообщений: STT -> обработка как текст -> ответ"""
+    if not check_access(update.effective_user.id):
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+
+    if not voice_processor:
+        await update.message.reply_text(
+            "🎤 Голосовые сообщения не поддерживаются.\n"
+            "Включите: VOICE_ENABLED=true и OPENAI_API_KEY."
+        )
+        return
+
+    msg = await update.message.reply_text("🎤 Распознаю голосовое сообщение...")
+
+    try:
+        voice = update.message.voice or update.message.audio
+        if not voice:
+            await msg.edit_text("⚠️ Не удалось получить голосовое сообщение.")
+            return
+
+        duration = voice.duration or 0
+        if duration > 120:
+            await msg.edit_text("⚠️ Голосовое слишком длинное (макс 2 минуты).")
+            return
+
+        file = await context.bot.get_file(voice.file_id)
+        audio_bytes = await file.download_as_bytearray()
+
+        if not audio_bytes or len(audio_bytes) < 100:
+            await msg.edit_text("⚠️ Пустое голосовое сообщение.")
+            return
+
+        # Распознавание
+        try:
+            recognized_text = await voice_processor.speech_to_text(
+                bytes(audio_bytes),
+                filename=f"voice_{voice.file_unique_id}.ogg"
+            )
+        except Exception as e:
+            logger.error(f"STT error: {e}")
+            await msg.edit_text(f"⚠️ Ошибка распознавания: {e}")
+            return
+
+        if not recognized_text:
+            await msg.edit_text("🤔 Не удалось распознать речь. Попробуйте ещё раз.")
+            return
+
+        await msg.edit_text(f"🎤 «{recognized_text}»\n\n🤔 Анализирую...")
+
+        user_id = update.effective_user.id
+        question = recognized_text
+        q_lower = question.lower()
+
+        # Перехват стоп-листа
+        stop_kw = ["стоп лист", "стоп-лист", "стоплист", "что в стопе", "что в стоп"]
+        if any(kw in q_lower for kw in stop_kw):
+            try:
+                text = await get_stop_list_text()
+                await msg.edit_text(f"🎤 «{recognized_text}»")
+                keyboard = _build_inline_keyboard("stop")
+                await update.message.reply_text(text[:4000], reply_markup=keyboard)
+                await _maybe_send_tts(update, text)
+            except Exception as e:
+                await msg.edit_text(f"⚠️ {e}")
+            return
+
+        # Follow-up
+        follow_up_handled = await _handle_follow_up(user_id, question, msg, update)
+        if follow_up_handled:
+            return
+
+        # Основная обработка
+        try:
+            is_forecast = any(kw in q_lower for kw in ["прогноз", "forecast", "ожидать", "планир"])
+            is_kpi = any(kw in q_lower for kw in ["kpi", "кпи", "план", "цел", "гонк", "рейтинг"])
+
+            if is_kpi and waiter_kpi:
+                kpi_text = await waiter_kpi.format_kpi_monthly()
+                data = f"═══ KPI ═══\n{kpi_text}\n═══════════"
+                detected_cmd = "kpi"
+            elif is_forecast and iiko_server:
+                period = _detect_period(question)
+                data = await get_combined_data(period)
+                detected_cmd = "forecast"
+            else:
+                date_range = _parse_date_range(question)
+                if date_range:
+                    df, dt, lbl = date_range
+                    data = await get_combined_data_by_dates(df, dt, lbl)
+                    detected_cmd = "period:custom"
+                else:
+                    period = _detect_period(question)
+                    data = await get_combined_data(period)
+                    detected_cmd = f"period:{period}"
+
+            data = "\n".join(
+                line for line in data.split("\n")
+                if not any(name in line for name in EXCLUDED_STAFF)
+            )
+
+            conversation_memory.add_user_message(user_id, question, command=detected_cmd)
+            history_ctx = conversation_memory.get_context(user_id)
+            dish_names = _extract_dish_names(data)
+            analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history_ctx)
+            conversation_memory.add_assistant_message(user_id, analysis, command=detected_cmd, data_summary=data[:1000])
+
+            await msg.edit_text(f"🎤 «{recognized_text}»")
+            keyboard = _build_inline_keyboard("free_question")
+            try:
+                await update.message.reply_text(analysis[:4000], parse_mode="Markdown", reply_markup=keyboard)
+            except Exception:
+                await update.message.reply_text(analysis[:4000], reply_markup=keyboard)
+
+            await _maybe_send_tts(update, analysis)
+
+        except Exception as e:
+            await msg.edit_text(f"🎤 «{recognized_text}»\n\n⚠️ Ошибка: {e}")
+
+    except Exception as e:
+        logger.error(f"Voice handler error: {e}")
+        try:
+            await msg.edit_text(f"⚠️ Ошибка: {e}")
+        except Exception:
+            pass
+
+
+async def cmd_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Управление голосовым модулем"""
+    if not check_access(update.effective_user.id):
+        return
+
+    global VOICE_TTS_ENABLED
+
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ("on", "вкл", "1"):
+            VOICE_TTS_ENABLED = True
+            await update.message.reply_text(
+                f"🔊 Голосовые ответы ВКЛЮЧЕНЫ.\nГолос: {VOICE_TTS_VOICE}\nВыключить: /voice off"
+            )
+            return
+        elif arg in ("off", "выкл", "0"):
+            VOICE_TTS_ENABLED = False
+            await update.message.reply_text("🔇 Голосовые ответы ВЫКЛЮЧЕНЫ.\nВключить: /voice on")
+            return
+
+    stt = "🟢 вкл" if voice_processor else "🔴 выкл"
+    tts = "🟢 вкл" if VOICE_TTS_ENABLED else "🔴 выкл"
+    lines = [
+        "🎤 Голосовой модуль",
+        f"  Распознавание (STT): {stt}",
+        f"  Озвучка (TTS): {tts}",
+    ]
+    if voice_processor:
+        lines.extend([
+            f"  Голос: {VOICE_TTS_VOICE}",
+            f"  Модель: {VOICE_TTS_MODEL}",
+            "", "  /voice on — включить озвучку",
+            "  /voice off — выключить",
+            "", "  Просто отправьте голосовое сообщение!",
+        ])
+    else:
+        lines.extend(["", "  Для включения: VOICE_ENABLED=true + OPENAI_API_KEY"])
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Сбросить контекст диалога"""
     if not check_access(update.effective_user.id):
@@ -3805,6 +4000,7 @@ async def post_init(application: Application):
         BotCommand("trend", "График тренда выручки"),
         BotCommand("heatmap", "Тепловая карта загрузки"),
         BotCommand("bubble", "ABC-диаграмма блюд"),
+        BotCommand("voice", "Голосовой модуль (настройки)"),
     ])
     if ADMIN_CHAT_ID:
         jq = application.job_queue
@@ -3965,7 +4161,9 @@ def main():
     app.add_handler(CommandHandler("trend", cmd_chart_trend))
     app.add_handler(CommandHandler("heatmap", cmd_chart_heatmap))
     app.add_handler(CommandHandler("bubble", cmd_chart_abc))
+    app.add_handler(CommandHandler("voice", cmd_voice))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 

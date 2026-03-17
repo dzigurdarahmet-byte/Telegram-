@@ -109,6 +109,14 @@ WEEKLY_REPORT_ENABLED = os.getenv("WEEKLY_REPORT_ENABLED", "true").lower() in ("
 WEEKLY_REPORT_DAY = int(os.getenv("WEEKLY_REPORT_DAY", "0"))  # 0 = понедельник
 WEEKLY_REPORT_HOUR_UTC = os.getenv("WEEKLY_REPORT_HOUR_UTC", "05:00")
 
+# ─── Голосовой модуль ────────────────────────────────────
+
+VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() in ("true", "1", "yes")
+VOICE_TTS_ENABLED = os.getenv("VOICE_TTS_ENABLED", "false").lower() in ("true", "1", "yes")
+VOICE_TTS_VOICE = os.getenv("VOICE_TTS_VOICE", "onyx")
+VOICE_TTS_MODEL = os.getenv("VOICE_TTS_MODEL", "tts-1")
+VOICE_TTS_MAX_LENGTH = int(os.getenv("VOICE_TTS_MAX_LENGTH", "800"))
+
 
 def validate():
     errors = []
