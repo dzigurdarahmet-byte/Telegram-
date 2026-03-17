@@ -35,7 +35,7 @@ class IikoServerClient:
 
     async def _ensure_token(self):
         """Получить или обновить токен"""
-        if self.token and self.token_time and (datetime.now() - self.token_time).seconds < 600:
+        if self.token and self.token_time and (datetime.now() - self.token_time).total_seconds() < 600:
             return
         response = await self.client.get(
             f"{self.server_url}/resto/api/auth",

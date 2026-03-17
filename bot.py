@@ -151,6 +151,8 @@ def check_access(user_id: int) -> bool:
     """Проверить доступ: админы + одобренные (env + сессия).
     Если ADMIN_USERS пуст — доступ открыт всем (обратная совместимость).
     """
+    if not user_id:
+        return False
     if not ADMIN_USERS:
         return True
     if user_id in ADMIN_USERS:
@@ -408,8 +410,8 @@ async def _safe_send(msg, text: str, update: Update = None):
                     await msg.edit_text(part)
                 elif update:
                     await update.message.reply_text(part)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"_safe_send: не удалось отправить сообщение: {e}")
 
 
 async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str, question: str):
@@ -983,7 +985,11 @@ async def _handle_approve(query, data: str, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id_str = data.replace("approve_", "")
-    user_id = int(user_id_str)
+    try:
+        user_id = int(user_id_str)
+    except ValueError:
+        await query.edit_message_text("⚠️ Некорректный ID пользователя.")
+        return
 
     # Сохраняем в память сессии
     _approved_session[user_id] = {
@@ -1021,7 +1027,11 @@ async def _handle_reject(query, data: str, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id_str = data.replace("reject_", "")
-    user_id = int(user_id_str)
+    try:
+        user_id = int(user_id_str)
+    except ValueError:
+        await query.edit_message_text("⚠️ Некорректный ID пользователя.")
+        return
 
     await query.edit_message_text(
         f"❌ Пользователь ID `{user_id}` отклонён.",
@@ -1668,6 +1678,49 @@ def _parse_date_range(question: str):
     today = datetime.now()
     year = today.year
 
+    # Паттерн: "позавчера"
+    if "позавчера" in q:
+        d = today - timedelta(days=2)
+        ds = d.strftime("%Y-%m-%d")
+        return ds, ds, "Позавчера"
+
+    # Паттерн: "вчера"
+    if re.search(r'\bвчера\b', q) and not re.search(r'сравни|и\s+позавчера|позавчера\s+и', q):
+        d = today - timedelta(days=1)
+        ds = d.strftime("%Y-%m-%d")
+        return ds, ds, "Вчера"
+
+    # Паттерн: "сегодня"
+    if re.search(r'\bсегодня\b', q) and not re.search(r'сравни', q):
+        ds = today.strftime("%Y-%m-%d")
+        return ds, ds, "Сегодня"
+
+    # Паттерн: "за прошлый месяц"
+    if re.search(r'прошл\w+\s+месяц', q):
+        first_of_this = today.replace(day=1)
+        last_of_prev = first_of_this - timedelta(days=1)
+        first_of_prev = last_of_prev.replace(day=1)
+        return (first_of_prev.strftime("%Y-%m-%d"),
+                last_of_prev.strftime("%Y-%m-%d"),
+                f"Прошлый месяц ({first_of_prev.strftime('%m.%Y')})")
+
+    # Паттерн: "за прошлую неделю"
+    if re.search(r'прошл\w+\s+недел', q):
+        weekday = today.weekday()
+        this_monday = today - timedelta(days=weekday)
+        prev_monday = this_monday - timedelta(days=7)
+        prev_sunday = this_monday - timedelta(days=1)
+        return (prev_monday.strftime("%Y-%m-%d"),
+                prev_sunday.strftime("%Y-%m-%d"),
+                "Прошлая неделя")
+
+    # Паттерн: "за этот месяц" / "за текущий месяц"
+    if re.search(r'(?:этот|текущ\w*)\s+месяц', q):
+        first_day = today.replace(day=1)
+        return (first_day.strftime("%Y-%m-%d"),
+                today.strftime("%Y-%m-%d"),
+                "Этот месяц")
+
     # Паттерн: "с 1 по 26 февраля" или "1-26 февраля" или "1 - 26 февраля"
     m = re.search(
         r'(?:с\s+)?(\d{1,2})\s*[-–—по]+\s*(\d{1,2})\s+([а-яё]+)',
@@ -1709,22 +1762,6 @@ def _parse_date_range(question: str):
             label = f"{day1} {month1_str} — {day2} {month2_str}"
             return date_from, date_to, label
 
-    # Паттерн: "за февраль", "в январе", "февраль 2025"
-    m = re.search(r'(?:за|в|на)\s+([а-яё]+)(?:\s+(\d{4}))?', q)
-    if not m:
-        m = re.search(r'([а-яё]+)\s+(\d{4})', q)
-    if m:
-        month = _parse_month_name(m.group(1))
-        if month:
-            y = int(m.group(2)) if m.group(2) else year
-            if not m.group(2) and month > today.month:
-                y -= 1
-            last_day = calendar.monthrange(y, month)[1]
-            date_from = f"{y}-{month:02d}-01"
-            date_to = f"{y}-{month:02d}-{last_day:02d}"
-            label = f"{m.group(1).capitalize()} {y}"
-            return date_from, date_to, label
-
     # Паттерн: "01.02-26.02" или "01.02.2026-26.02.2026"
     m = re.search(
         r'(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s*[-–—]\s*(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?',
@@ -1741,7 +1778,8 @@ def _parse_date_range(question: str):
         return date_from, date_to, label
 
     # Паттерн: "8 марта", "14 февраля", "25 декабря" — конкретная дата
-    m = re.search(r'(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?', q)
+    # (должен быть ДО паттерна "за февраль", чтобы "за 8 марта 2025" не матчил весь месяц)
+    m = re.search(r'(?:за\s+)?(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?', q)
     if m:
         day = int(m.group(1))
         month = _parse_month_name(m.group(2))
@@ -1757,6 +1795,22 @@ def _parse_date_range(question: str):
                 return date_str, date_str, label
             except ValueError:
                 pass
+
+    # Паттерн: "за февраль", "в январе", "февраль 2025"
+    m = re.search(r'(?:за|в|на)\s+([а-яё]+)(?:\s+(\d{4}))?', q)
+    if not m:
+        m = re.search(r'([а-яё]+)\s+(\d{4})', q)
+    if m:
+        month = _parse_month_name(m.group(1))
+        if month:
+            y = int(m.group(2)) if m.group(2) else year
+            if not m.group(2) and month > today.month:
+                y -= 1
+            last_day = calendar.monthrange(y, month)[1]
+            date_from = f"{y}-{month:02d}-01"
+            date_to = f"{y}-{month:02d}-{last_day:02d}"
+            label = f"{m.group(1).capitalize()} {y}"
+            return date_from, date_to, label
 
     return None
 

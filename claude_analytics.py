@@ -121,20 +121,31 @@ class ClaudeAnalytics:
         """Вызов OpenAI API"""
         # Для o1/o3 моделей используем role "developer" вместо "system"
         model_lower = self.openai_model.lower()
-        if model_lower.startswith("o1") or model_lower.startswith("o3"):
+        is_reasoning = model_lower.startswith("o1") or model_lower.startswith("o3")
+
+        if is_reasoning:
             system_role = "developer"
         else:
             system_role = "system"
 
+        # o1/o3 используют max_completion_tokens вместо max_tokens
+        token_kwargs = (
+            {"max_completion_tokens": 2000} if is_reasoning
+            else {"max_tokens": 2000}
+        )
+
         response = self.openai_client.chat.completions.create(
             model=self.openai_model,
-            max_tokens=2000,
             messages=[
                 {"role": system_role, "content": system},
                 {"role": "user", "content": user_message},
             ],
+            **token_kwargs,
         )
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("OpenAI вернул пустой ответ")
+        return content
 
     def _call_claude(self, system: str, user_message: str, is_fallback: bool = False) -> str:
         """Вызов Claude API (резервный)"""
