@@ -454,7 +454,7 @@ async def _handle_follow_up(user_id: int, question: str, msg, update: Update) ->
             if not any(name in line for name in EXCLUDED_STAFF)
         )
 
-        await msg.edit_text(f"🤔 Продолжаю анализ ({context_label})...")
+        await _safe_edit_text(msg, f"🤔 Продолжаю анализ ({context_label})...")
 
         history = conversation_memory.get_context(user_id)
         dish_names = _extract_dish_names(data)
@@ -833,6 +833,15 @@ async def _safe_send(msg, text: str, update: Update = None, context_key: str = "
                     await update.message.reply_text(part, reply_markup=reply_markup)
             except Exception as e:
                 logger.error(f"_safe_send: не удалось отправить сообщение: {e}")
+
+
+async def _safe_edit_text(msg, text: str, **kwargs):
+    """edit_text с защитой от BadRequest 'Message is not modified'"""
+    try:
+        await msg.edit_text(text, **kwargs)
+    except Exception as e:
+        if "not modified" not in str(e).lower():
+            logger.warning(f"edit_text error: {e}")
 
 
 async def cmd_period(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str, question: str):
@@ -2630,9 +2639,43 @@ async def cmd_diag(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             parts.append("\n🖥️ ЛОКАЛЬНЫЙ СЕРВЕР: не настроен")
 
-        await msg.edit_text("\n".join(parts))
+        # AI
+        parts.append("")
+        parts.append("🤖 AI:")
+        if claude.openai_client:
+            try:
+                import time as _time
+                _t0 = _time.time()
+                test = claude.openai_client.chat.completions.create(
+                    model=claude.openai_model,
+                    messages=[{"role": "user", "content": "Ответь одним словом: OK"}],
+                    max_tokens=5,
+                )
+                _elapsed = _time.time() - _t0
+                if test.choices and test.choices[0].message.content:
+                    parts.append(f"✅ OpenAI ({claude.openai_model}): OK ({_elapsed:.1f}s)")
+                else:
+                    parts.append(f"⚠️ OpenAI: пустой ответ")
+            except Exception as e:
+                parts.append(f"❌ OpenAI: {e}")
+        else:
+            parts.append("⚠️ OpenAI: не настроен")
+
+        try:
+            import time as _time
+            _t0 = _time.time()
+            test = claude.client.messages.create(
+                model=claude.model, max_tokens=5,
+                messages=[{"role": "user", "content": "OK"}],
+            )
+            _elapsed = _time.time() - _t0
+            parts.append(f"✅ Claude ({claude.model}): OK ({_elapsed:.1f}s)")
+        except Exception as e:
+            parts.append(f"❌ Claude: {e}")
+
+        await _safe_edit_text(msg, "\n".join(parts))
     except Exception as e:
-        await msg.edit_text(f"⚠️ Ошибка: {e}")
+        await _safe_edit_text(msg, f"⚠️ Ошибка: {e}")
 
 
 MONTH_MAP = {
@@ -3108,7 +3151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else "📊 Загружаю KPI..." if is_kpi_query
         else "🤔 Анализирую..."
     )
-    await msg.edit_text(status_text)
+    await _safe_edit_text(msg, status_text)
     try:
         # KPI-запросы — данные WaiterKPI + Claude
         if is_kpi_query and waiter_kpi:
@@ -3150,8 +3193,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             multi = _parse_multi_periods(question)
             if multi and iiko_server and len(multi) >= 2:
                 logger.info(f"Мульти-период: {len(multi)} периодов")
-                await msg.edit_text(
-                    f"🤔 Загружаю данные за {len(multi)} периодов..."
+                await _safe_edit_text(
+                    msg, f"🤔 Загружаю данные за {len(multi)} периодов..."
                 )
                 parts = []
                 for date_from, date_to, label in multi:
@@ -3203,7 +3246,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conversation_memory.add_assistant_message(user_id, analysis, command=detected_cmd, data_summary=data[:1000])
         await _safe_send(msg, analysis, update, context_key="free_question")
     except Exception as e:
-        await msg.edit_text(f"⚠️ Ошибка: {e}")
+        await _safe_edit_text(msg, f"⚠️ Ошибка: {e}")
 
 
 # ─── Автоотчёты ────────────────────────────────────────────
@@ -3635,19 +3678,19 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         voice = update.message.voice or update.message.audio
         if not voice:
-            await msg.edit_text("⚠️ Не удалось получить голосовое сообщение.")
+            await _safe_edit_text(msg, "⚠️ Не удалось получить голосовое сообщение.")
             return
 
         duration = voice.duration or 0
         if duration > 120:
-            await msg.edit_text("⚠️ Голосовое слишком длинное (макс 2 минуты).")
+            await _safe_edit_text(msg, "⚠️ Голосовое слишком длинное (макс 2 минуты).")
             return
 
         file = await context.bot.get_file(voice.file_id)
         audio_bytes = await file.download_as_bytearray()
 
         if not audio_bytes or len(audio_bytes) < 100:
-            await msg.edit_text("⚠️ Пустое голосовое сообщение.")
+            await _safe_edit_text(msg, "⚠️ Пустое голосовое сообщение.")
             return
 
         # Распознавание
@@ -3658,14 +3701,14 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(f"STT error: {e}")
-            await msg.edit_text(f"⚠️ Ошибка распознавания: {e}")
+            await _safe_edit_text(msg, f"⚠️ Ошибка распознавания: {e}")
             return
 
         if not recognized_text:
-            await msg.edit_text("🤔 Не удалось распознать речь. Попробуйте ещё раз.")
+            await _safe_edit_text(msg, "🤔 Не удалось распознать речь. Попробуйте ещё раз.")
             return
 
-        await msg.edit_text(f"🎤 «{recognized_text}»\n\n🤔 Анализирую...")
+        await _safe_edit_text(msg, f"🎤 «{recognized_text}»\n\n🤔 Анализирую...")
 
         user_id = update.effective_user.id
         question = recognized_text
@@ -3676,12 +3719,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(kw in q_lower for kw in stop_kw):
             try:
                 text = await get_stop_list_text()
-                await msg.edit_text(f"🎤 «{recognized_text}»")
+                await _safe_edit_text(msg, f"🎤 «{recognized_text}»")
                 keyboard = _build_inline_keyboard("stop")
                 await update.message.reply_text(text[:4000], reply_markup=keyboard)
                 await _maybe_send_tts(update, text)
             except Exception as e:
-                await msg.edit_text(f"⚠️ {e}")
+                await _safe_edit_text(msg, f"⚠️ {e}")
             return
 
         # Follow-up
@@ -3724,7 +3767,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             analysis = claude.analyze(question, data, dish_names=dish_names, conversation_history=history_ctx)
             conversation_memory.add_assistant_message(user_id, analysis, command=detected_cmd, data_summary=data[:1000])
 
-            await msg.edit_text(f"🎤 «{recognized_text}»")
+            await _safe_edit_text(msg, f"🎤 «{recognized_text}»")
             keyboard = _build_inline_keyboard("free_question")
             try:
                 await update.message.reply_text(analysis[:4000], parse_mode="Markdown", reply_markup=keyboard)
@@ -3734,14 +3777,11 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _maybe_send_tts(update, analysis)
 
         except Exception as e:
-            await msg.edit_text(f"🎤 «{recognized_text}»\n\n⚠️ Ошибка: {e}")
+            await _safe_edit_text(msg, f"🎤 «{recognized_text}»\n\n⚠️ Ошибка: {e}")
 
     except Exception as e:
         logger.error(f"Voice handler error: {e}")
-        try:
-            await msg.edit_text(f"⚠️ Ошибка: {e}")
-        except Exception:
-            pass
+        await _safe_edit_text(msg, f"⚠️ Ошибка: {e}")
 
 
 async def cmd_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
